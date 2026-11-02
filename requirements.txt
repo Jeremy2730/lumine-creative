@@ -1,0 +1,8 @@
+# Dependencias de ejecución (centralizadas aquí).
+# Python 3.10 - 3.13 recomendado.
+Pillow==12.3.0
+numpy==2.4.6
+rembg[cpu]==2.0.85
+opencv-python==4.14.0.94
+tqdm==4.70.1
+customtkinter==5.2.2

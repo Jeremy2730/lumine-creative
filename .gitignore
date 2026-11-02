@@ -1,0 +1,54 @@
+
+# ==========================================
+# Lumine Creative - Archivos ignorados por Git
+# ==========================================
+
+# Python: caché y archivos compilados
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Entornos virtuales
+.venv/
+venv/
+env/
+
+# Pruebas y cobertura
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+
+# Registros de ejecución
+logs/
+*.log
+
+# Archivos temporales y copias de respaldo
+*.tmp
+*.temp
+*.bak
+*.orig
+*~
+
+# Configuración local y secretos
+.env
+.env.*
+!.env.example
+
+# Editores y herramientas de desarrollo
+.vscode/
+.idea/
+
+# Archivos del sistema operativo
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Distribución y compilación
+build/
+dist/
+
+
+# Documentación interna de desarrollo
+docs/investigacion_remove/
+docs/notas.mddocs/lumine creative_tree.pdf
