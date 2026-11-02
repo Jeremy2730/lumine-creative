@@ -33,7 +33,7 @@ Todo está en el menú **Archivos** (y en sus atajos). Ya no hay botones grandes
 | Guardar como… | `Ctrl+Mayús+S` | Siempre pregunta ruta, nombre y formato (PNG o JPG). |
 | Salir | — | Cierra la aplicación (igual que la X de la ventana). |
 
-El menú **Herramientas** es el único acceso a las herramientas (Quitar fondo, Semitono, Tamaño y resolución…, Dar nitidez): la ventana ya no tiene botones por herramienta y esa área la ocupa la imagen. Debajo de la imagen solo queda el historial de procesos aplicados. El título de la ventana muestra el documento actual y un `*` si tiene cambios sin guardar.
+El menú **Herramientas** es el único acceso a las herramientas (Quitar fondo, Semitono, Tamaño y resolución…, Dar nitidez): la ventana ya no tiene botones por herramienta y el espacio lo ocupa la imagen. Se mantiene el encabezado con el nombre de la aplicación y el autor, y el estado de la aplicación debajo de la imagen. El panel "Pipeline / procesos aplicados" está **oculto por ahora**: el historial de operaciones sigue registrándose (`ProcessingState`, detección de cambios pendientes) y el panel se sigue alimentando, solo no se muestra. El título de la ventana muestra el documento actual y un `*` si tiene cambios sin guardar.
 
 **Abrir**
 - Se corrige la orientación EXIF antes de convertir a RGBA (una foto de celular se abre ya girada correctamente).
@@ -62,6 +62,17 @@ El menú **Herramientas** es el único acceso a las herramientas (Quitar fondo, 
 - Si abres otro archivo o cierras con cambios pendientes, se ofrece **Guardar**, **Descartar** o **Cancelar**. Si Guardar se cancela o falla, no se continúa con la apertura ni el cierre.
 - No se cierra la aplicación mientras hay un proceso en curso (se avisa y hay que esperar).
 
+## Visor de imagen
+
+La imagen se dibuja en un canvas cuya geometría la dicta un modelo (`gui/viewport.py`) y cuyos píxeles produce un renderizador aparte (`gui/viewport_renderer.py`); `ImagePanel` solo conecta ambos con Tk.
+
+- **Al abrir una imagen** se ajusta entera al área disponible y se centra; las imágenes pequeñas se amplían para aprovechar el espacio, hasta un máximo del 3200 %. La proporción original se conserva siempre.
+- **Al aplicar una herramienta** sobre el mismo documento se conservan el zoom y el encuadre (hoy siempre "ajustado", porque aún no hay zoom manual). Si **cambian las dimensiones** (Tamaño y resolución), el encuadre se conserva en proporción. Abrir otra imagen (o volver a abrir el mismo archivo) vuelve a ajustar.
+- **Al cambiar el tamaño de la ventana** se reajusta (o se conserva el centro, en zoom manual), agrupando las ráfagas de eventos en un único renderizado.
+- **Solo es visualización.** El visor guarda una referencia a la imagen del motor (no una copia) y nunca la modifica; no cambia las dimensiones, el DPI, el historial ni lo que se guarda.
+- **Imágenes grandes:** con zoom menor al 100 % se dibuja desde niveles reducidos construidos una sola vez por imagen y reutilizados, de modo que redimensionar la ventana no vuelve a reducir la imagen original.
+- **Todavía no hay** zoom (rueda, botones o porcentaje), paneo, modo mano ni barras de desplazamiento; el visor está preparado para incorporarlos (`ImagePanel.viewport` y `redraw()`).
+
 ## Quitar fondo y Semitono
 
 Son dos herramientas independientes:
@@ -84,7 +95,9 @@ pytest
 
 - Las pruebas de lógica (cargador, servicios, controladores, herramientas) no necesitan pantalla ni `rembg`.
 - Las pruebas de ventana (menú, atajos, título, cierre, diálogo de tamaño y resolución) necesitan un display: **sin él se omiten** (`skipped`). En un servidor sin pantalla: `xvfb-run -a pytest`.
-- Resultado de referencia: 193 pasan con display; sin display, 166 pasan y 27 se omiten.
+- Resultado de referencia: 437 pasan con display; sin display, 386 pasan y 51 se omiten.
+- La prueba que captura la pantalla real exige una pantalla virtual de al menos 1050×750 y 24 bits (el valor por defecto de `xvfb-run` ya lo cumple); si no, se omite con su motivo.
+- Las pruebas de ventana que lanzan herramientas usan el fixture `tk_gc_on_main_thread` (`tests/conftest.py`): las pruebas mueven la ventana con `update()` y no con `mainloop()`, y una llamada a Tk desde un hilo de trabajo (que el recolector de basura puede provocar al finalizar fuentes o imágenes de Tk) espera 1 s y falla en ese modo. En la aplicación real (`mainloop()`) la misma llamada es inmediata.
 - Los diálogos nativos de archivo y de confirmación son modales y no se pueden automatizar: las pruebas los sustituyen por funciones falsas. Esa parte exige la prueba manual descrita más abajo.
 
 ## Usar el motor sin GUI
@@ -130,7 +143,9 @@ HerramientaDiseno/
 │   └── size_resolution/        # herramienta con core, controller y dialog propios
 ├── gui/
 │   ├── main_window.py          # ventana: paneles, menú, atajos, título, cierre
-│   ├── panels/                 # image_panel, tools_panel (historial de procesos), status_panel
+│   ├── viewport.py             # modelo geométrico de la vista (sin Tk): zoom, posición, centrado, límites
+│   ├── viewport_renderer.py    # píxeles de la vista (solo Pillow): recorte, escalado, niveles reducidos
+│   ├── panels/                 # image_panel (visor), tools_panel (historial; oculto), status_panel
 │   └── components/             # buttons, dialogs (archivo y confirmación), menu_bar
 ├── config/                     # settings.py, logging_config.py
 └── tests/
@@ -199,9 +214,9 @@ engine.run_pipeline(pipeline)               # o service.run_pipeline([...nombres
 
 Los diálogos nativos no se automatizan; esta secuencia cubre lo que las pruebas no pueden:
 
-1. `python main.py`. Debe verse la barra **Archivos / Herramientas** y la ventana sin botones: la imagen (con todo el espacio posible), el historial de procesos y la barra de estado.
+1. `python main.py`. Debe verse la barra **Archivos / Herramientas**, el encabezado con el nombre y el autor, la imagen (con todo el espacio posible) y la barra de estado; no debe verse el panel "Pipeline / procesos aplicados".
 2. **Archivos ▸ Abrir… (`Ctrl+O`)** y elige un PNG o JPG. El título muestra `nombre — Herramienta para Diseño`, sin `*`.
-3. Aplica **Herramientas ▸ Dar nitidez**. El título pasa a `nombre * — …` y aparece el proceso "Nitidez".
+3. Aplica **Herramientas ▸ Dar nitidez**. El título pasa a `nombre * — …` y la imagen conserva su encuadre.
 4. **Archivos ▸ Guardar (`Ctrl+S`)**: como es la primera vez se abre **Guardar como**, con el nombre sugerido `<original>_editada.<ext>`. Elige una ruta distinta del original y confirma. El título pierde el `*` y el original no cambia.
 5. Aplica otra herramienta desde el menú **Herramientas** y pulsa `Ctrl+S`: guarda en el mismo archivo **sin preguntar**.
 6. **Guardar como… (`Ctrl+Mayús+S`)**: elige otro nombre. Verifica que el título adopta el nuevo nombre. Repite cancelando el diálogo: no debe cambiar nada.

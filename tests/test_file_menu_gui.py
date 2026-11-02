@@ -48,7 +48,7 @@ def make_png(folder: Path, name="foto.png") -> Path:
 
 
 @pytest.fixture
-def ui(tmp_path, monkeypatch):
+def ui(tmp_path, monkeypatch, tk_gc_on_main_thread):
     settings = Settings(output_dir=tmp_path / "descargas", app_title=TITLE)
     try:
         design, files = build_controllers(settings)
@@ -186,9 +186,9 @@ def layout(ui):
     return SimpleNamespace(
         window=(w.winfo_width(), w.winfo_height()),
         image=(image.winfo_width(), image.winfo_height()),
-        bottom=bottom.winfo_height(),
+        pipeline_visible=bool(bottom.winfo_ismapped()),
         status_bottom=status.winfo_y() + status.winfo_height(),
-        drawn=tuple(image._ctk_image._size),
+        drawn=image.viewport.rendered_size,  # lo que dibuja el visor lo dicta el modelo
     )
 
 
@@ -229,8 +229,9 @@ def test_image_panel_gets_all_the_freed_space_and_follows_the_window(ui):
     for geometry, m in sizes.items():
         # El espacio liberado no queda vacío: la pila de paneles llena la ventana hasta su margen inferior (16 px).
         assert abs(m.window[1] - (m.status_bottom + 16)) <= 2, geometry
-        # La imagen domina la ventana (con los botones el panel inferior medía más de la mitad que la imagen).
-        assert m.image[1] > 3 * m.bottom, geometry
+        # El panel de procesos está oculto y la imagen se queda con ese espacio: domina la ventana.
+        assert not m.pipeline_visible, geometry
+        assert m.image[1] >= 0.7 * m.window[1], geometry
         # Sin deformar: misma proporción que el original (900×1400) y siempre dentro del panel.
         assert abs(m.drawn[0] / m.drawn[1] - 900 / 1400) < 0.01, geometry
         assert m.drawn[0] <= m.image[0] and m.drawn[1] <= m.image[1], geometry
@@ -238,7 +239,6 @@ def test_image_panel_gets_all_the_freed_space_and_follows_the_window(ui):
     # Al agrandar la ventana, TODO el espacio extra va a la imagen; los demás paneles no cambian.
     assert large.image[0] - default.image[0] >= 400 - 2 and large.image[1] - default.image[1] >= 140 - 2
     assert default.image[1] - small.image[1] >= 120 - 2
-    assert large.bottom == default.bottom == small.bottom
 
 
 # ---------------- atajos reales ----------------

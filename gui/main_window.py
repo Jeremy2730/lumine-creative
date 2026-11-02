@@ -18,6 +18,15 @@ Notas:
     - ``file_controller`` es opcional: sin él la ventana funciona como antes
       (sin acciones de archivo), lo que mantiene compatibles las pruebas que
       la construyen solo con ``controller`` y ``settings``.
+    - El panel "Pipeline / procesos aplicados" está OCULTO (``grid_remove``)
+      pero sigue creado y alimentado con ``set_operations``: el historial
+      de operaciones y su funcionamiento interno no cambian, y volver a
+      mostrarlo es una sola llamada a ``grid()``.
+    - Cada ``show_snapshot`` indica al visor si la imagen continúa el mismo
+      documento (``_continues_document``: mismo origen y una operación más
+      que antes) para conservar zoom y encuadre, o si es una imagen nueva
+      para ajustarla al área. Se decide aquí porque solo la ventana ve
+      ambos snapshots.
     - ``_poll`` re-programa el sondeo en un ``finally``: si un callback de
       resultado lanzara una excepción, el sondeo seguiría vivo (antes se
       detenía para siempre y la aplicación quedaba "ocupada").
@@ -45,6 +54,20 @@ from tools.size_resolution import SizeResolutionController
 from tools.size_resolution.dialog import SizeResolutionDialog
 
 _POLL_MS = 50
+
+
+def _continues_document(previous: ImageSnapshot | None, current: ImageSnapshot) -> bool:
+    """True si ``current`` es el resultado de aplicar herramientas sobre ``previous``.
+
+    Abrir una imagen (aunque sea el mismo archivo) deja ``operations`` vacío o
+    con el origen distinto, así que cuenta como documento nuevo.
+    """
+    return (
+        previous is not None
+        and bool(current.operations)
+        and current.source_path == previous.source_path
+        and len(current.operations) > len(previous.operations)
+    )
 
 
 class MainWindow(ctk.CTk):
@@ -80,6 +103,7 @@ class MainWindow(ctk.CTk):
 
         self._tools_panel = ToolsPanel(self)
         self._tools_panel.grid(row=2, column=0, padx=16, pady=8, sticky="ew")
+        self._tools_panel.grid_remove()  # oculto por ahora; se sigue alimentando en show_snapshot
 
         self._status_panel = StatusPanel(self)
         self._status_panel.grid(row=3, column=0, padx=16, pady=(8, 16), sticky="ew")
@@ -131,8 +155,9 @@ class MainWindow(ctk.CTk):
 
     # ---- DesignView (lo que llama el controlador) ----
     def show_snapshot(self, snapshot: ImageSnapshot) -> None:
+        keep_view = _continues_document(self._snapshot, snapshot)
         self._snapshot = snapshot
-        self._image_panel.show(snapshot.image)
+        self._image_panel.show(snapshot.image, keep_view=keep_view)
         self._tools_panel.set_operations([op.label for op in snapshot.operations])
         if self._file_controller is not None:
             self._file_controller.on_snapshot(snapshot)  # título y estado de cambios
