@@ -49,6 +49,9 @@ Notas (decisiones geométricas):
     - Cambio de tamaño del viewport: en modo ajustar se reajusta; en zoom
       manual se conserva el punto de la imagen que estaba en el centro del
       viewport. Cambiar el viewport nunca altera ``image_size``.
+    - Barras de desplazamiento: ``scroll_fractions`` y ``scroll_to_fraction``
+      traducen la posición a/desde las fracciones que usan las barras; las
+      barras no guardan geometría propia, la consultan aquí cada vez.
     - Viewport 0×0 es válido (ventana minimizada o aún sin dibujar):
       no hay nada visible, pero no falla; al recibir un tamaño real se
       recalcula. La imagen siempre exige tamaño > 0.
@@ -237,6 +240,22 @@ class ViewportModel:
             self._axis_bounds(self._viewport[1], rh),
         )
 
+    @property
+    def scroll_fractions(self) -> tuple[tuple[float, float] | None, tuple[float, float] | None]:
+        """Por eje, la parte visible de la imagen escalada como ``(inicio, fin)`` en ``[0, 1]``
+        (el protocolo de las barras de desplazamiento), o ``None`` si ese eje cabe entero
+        (no hay nada que desplazar). Se deriva siempre de la posición actual: no guarda estado."""
+        out: list[tuple[float, float] | None] = []
+        for axis, (low, high) in enumerate(self.position_bounds):
+            viewport_len, rendered_len = self._viewport[axis], self.rendered_size[axis]
+            if viewport_len <= 0 or low == high:
+                out.append(None)
+                continue
+            start = _clamp(-self.position[axis] / rendered_len, 0.0, 1.0)
+            end = _clamp((viewport_len - self.position[axis]) / rendered_len, 0.0, 1.0)
+            out.append((start, end))
+        return out[0], out[1]
+
     def visible_area(self) -> VisibleArea | None:
         """Zona visible de la imagen y su rectángulo de destino; ``None`` si no hay nada que pintar
         (viewport sin área)."""
@@ -324,6 +343,18 @@ class ViewportModel:
         """Coloca la esquina superior izquierda de la imagen en ``(x, y)``, acotada a los límites."""
         px, py = _number(x, "x"), _number(y, "y")
         self._x, self._y = self._clamp_position(px, py)
+
+    def scroll_to_fraction(self, axis: int, fraction: float) -> None:
+        """Coloca el borde inicial de la parte visible en ``fraction`` (0-1) de la imagen escalada,
+        en el eje ``axis`` (0 = horizontal, 1 = vertical), sin tocar el otro. Es el ``moveto`` de
+        una barra de desplazamiento; queda acotado a los límites como cualquier paneo."""
+        if axis not in (0, 1) or isinstance(axis, bool):
+            raise ValueError(f"axis debe ser 0 (horizontal) o 1 (vertical), recibido {axis!r}.")
+        target = -_number(fraction, "fraction") * self.rendered_size[axis]
+        if axis == 0:
+            self.pan_to(target, self._y)
+        else:
+            self.pan_to(self._x, target)
 
     # ------------------------------------------------------------ internos
     @property

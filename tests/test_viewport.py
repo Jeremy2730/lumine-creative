@@ -578,3 +578,80 @@ def test_visible_area_is_consistent_with_zoom_under_random_operations():
                     assert (src[1] - src[0]) * model.zoom == pytest.approx(dest[1] - dest[0], abs=1e-6)
                 else:  # eje entero: el destino es el tamaño renderizado redondeado
                     assert abs((dest[1] - dest[0]) - rendered) <= 1
+
+
+# ------------------------------------------------- barras de desplazamiento (fase 1 del visor)
+
+def test_scroll_fractions_are_none_when_the_image_fits_on_both_axes():
+    model = ViewportModel((400, 200), (800, 600))
+    assert model.scroll_fractions == (None, None)
+
+
+def test_scroll_fractions_follow_zoom_and_pan_and_stay_in_range():
+    model = ViewportModel((1000, 1000), (400, 300))
+    model.set_zoom(1.0)  # 1000×1000 en 400×300: ambos ejes desplazables
+    (x0, x1), (y0, y1) = model.scroll_fractions
+    assert x0 == pytest.approx(300 / 1000) and x1 == pytest.approx(700 / 1000)  # centrado
+    assert y0 == pytest.approx(350 / 1000) and y1 == pytest.approx(650 / 1000)
+    model.pan_by(10_000, 10_000)  # contra el borde superior izquierdo
+    assert model.scroll_fractions[0][0] == 0.0 and model.scroll_fractions[1][0] == 0.0
+    model.pan_by(-10_000, -10_000)
+    assert model.scroll_fractions[0][1] == 1.0 and model.scroll_fractions[1][1] == 1.0
+    for fractions in model.scroll_fractions:
+        assert 0.0 <= fractions[0] < fractions[1] <= 1.0
+
+
+def test_scroll_fractions_report_each_axis_separately():
+    model = ViewportModel((2000, 100), (500, 500))
+    model.set_zoom(1.0)
+    horizontal, vertical = model.scroll_fractions
+    assert horizontal is not None and vertical is None  # la imagen cabe en vertical
+
+
+def test_scroll_fractions_are_none_for_an_empty_viewport():
+    assert ViewportModel((100, 100), (0, 0)).scroll_fractions == (None, None)
+
+
+@pytest.mark.parametrize("axis", [0, 1])
+def test_scroll_to_fraction_moves_only_its_axis_and_round_trips(axis):
+    model = ViewportModel((2000, 2000), (500, 400))
+    model.set_zoom(1.0)
+    other = 1 - axis
+    before = model.position[other]
+    model.scroll_to_fraction(axis, 0.25)
+    assert model.scroll_fractions[axis][0] == pytest.approx(0.25)
+    assert model.position[other] == before
+    assert model.position[axis] == pytest.approx(-0.25 * 2000)
+
+
+def test_scroll_to_fraction_is_clamped_to_the_bounds():
+    model = ViewportModel((2000, 2000), (500, 400))
+    model.set_zoom(1.0)
+    model.scroll_to_fraction(0, 5.0)
+    assert model.position[0] == model.position_bounds[0][0]
+    model.scroll_to_fraction(0, -5.0)
+    assert model.position[0] == 0.0
+
+
+def test_scroll_to_fraction_on_a_fitting_axis_keeps_it_centred():
+    model = ViewportModel((2000, 100), (500, 500))
+    model.set_zoom(1.0)
+    centred = model.position[1]
+    model.scroll_to_fraction(1, 0.7)
+    assert model.position[1] == centred
+
+
+@pytest.mark.parametrize("axis, fraction", [(2, 0.5), (-1, 0.5), (0, float("nan")), (0, float("inf"))])
+def test_scroll_to_fraction_rejects_invalid_values_without_changing_state(axis, fraction):
+    model = ViewportModel((2000, 2000), (500, 400))
+    model.set_zoom(1.0)
+    before = model.position
+    with pytest.raises(ValueError):
+        model.scroll_to_fraction(axis, fraction)
+    assert model.position == before
+
+
+def test_scroll_to_fraction_rejects_non_numbers():
+    model = ViewportModel((2000, 2000), (500, 400))
+    with pytest.raises(TypeError):
+        model.scroll_to_fraction(0, "0.5")
