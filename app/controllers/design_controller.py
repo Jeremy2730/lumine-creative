@@ -14,6 +14,10 @@ Notas:
     - Solo permite una operación a la vez (is_busy); los resultados de
       hilos llegan vía process_pending(), llamado periódicamente por la
       GUI.
+    - Estado de interacción: la bandera "ocupado" ya no vive aquí sino en
+      ``InteractionState`` (app/interaction.py), que además sabe qué acciones
+      bloquea cada herramienta (``can(Action)``). ``is_busy`` se conserva
+      como atajo de ``interaction.is_processing``.
     - Fase 1 de la reorganización por herramienta: "Tamaño y resolución"
       ya NO vive aquí. Sus 6 métodos específicos (resample_methods,
       preview_size_px, paired_dimension_cm, effective_dpi_from_cm,
@@ -25,12 +29,18 @@ Notas:
       por completo: su responsabilidad ya la cubre "Tamaño y
       resolución".
     - ``run_task`` es la ÚNICA compuerta de exclusión de tareas de la
-      aplicación (una sola bandera ``_busy`` y un solo runner). Las
+      aplicación (un solo ``InteractionState`` y un solo runner). Las
       herramientas (``run_tool``) y los flujos de archivo
       (``FileController``: abrir, guardar) pasan por ella, así que nunca
       se solapan. Acepta un ``on_error`` opcional para encadenar acciones
       que no deben continuar si la tarea falla (p. ej. cerrar tras un
       guardado que falló).
+    - Progreso: ``run_task(progress=True)`` entrega a ``work`` un
+      ``ProgressReporter``; los eventos llegan a ``process_pending()`` (hilo
+      de la GUI) y se pasan a ``view.show_progress`` SI la vista lo
+      implementa (es opcional: las vistas sin él siguen funcionando) y solo
+      mientras la tarea siga en curso. Las herramientas sin etapas no emiten
+      eventos y la vista muestra su barra indeterminada de siempre.
     - ``open_image`` y ``save`` son código HEREDADO: la GUI ya no los usa
       (abrir/guardar viven en ``FileController``). Se conservan porque
       pruebas existentes dependen de ellos; pendiente retirarlos al
@@ -47,10 +57,12 @@ from enum import Enum
 from pathlib import Path
 from typing import Any, Protocol
 
+from app.interaction import Action, InteractionState
 from app.services.processing_service import ProcessingService
 from app.services.task_runner import BackgroundTaskRunner
 from core.exceptions import DesignToolError, NoImageLoadedError, ValidationError
 from core.models import ImageSnapshot
+from core.progress import ProgressEvent, ProgressReporter
 
 logger = logging.getLogger(__name__)
 
@@ -106,19 +118,32 @@ class DesignController:
         self,
         service: ProcessingService,
         runner: BackgroundTaskRunner,
+        interaction: InteractionState | None = None,
     ) -> None:
         self._service = service
         self._runner = runner
+        self._interaction = interaction or InteractionState()
         self._view: DesignView | None = None
-        self._busy = False
 
     # ---- ciclo de vida ----
     def attach_view(self, view: DesignView) -> None:
         self._view = view
 
     @property
+    def interaction(self) -> InteractionState:
+        """Estado central: la GUI lo observa y pregunta ``can(Action)``."""
+        return self._interaction
+
+    @property
     def is_busy(self) -> bool:
-        return self._busy
+        return self._interaction.is_processing
+
+    def can(self, action: Action) -> bool:
+        return self._interaction.can(action)
+
+    def shutdown(self) -> None:
+        """Cierre de la aplicación: descarta lo pendiente (el hilo de trabajo es daemon)."""
+        self._runner.close()
 
     def process_pending(self) -> None:
         """La GUI lo llama periódicamente para recibir resultados de los hilos."""
@@ -185,11 +210,13 @@ class DesignController:
         msg = _TOOL_MESSAGES[name]
         self.run_task(
             start=msg.start,
-            work=lambda: self._service.apply_tool(name, **params),
+            work=lambda reporter: self._service.apply_tool(name, progress=reporter, **params),
             on_success=lambda snap: self._show(
                 snap, f"{msg.success} ({snap.size[0]} × {snap.size[1]} px)"
             ),
             error=msg.error,
+            progress=True,
+            tool=name,
         )
 
     def _require_image(self) -> bool:
@@ -206,6 +233,8 @@ class DesignController:
         on_success: Callable[[Any], None],
         error: str,
         on_error: Callable[[Exception], None] | None = None,
+        progress: bool = False,
+        tool: str | None = None,
     ) -> bool:
         """Ejecuta ``work`` en segundo plano con la compuerta de "ocupado".
 
@@ -214,21 +243,23 @@ class DesignController:
         una segunda bandera que pueda divergir. Devuelve ``False`` si la
         tarea se rechazó por estar ocupado. ``on_error`` (opcional) se
         invoca DESPUÉS del tratamiento estándar del error (log + mensaje).
+        Con ``progress=True``, ``work`` recibe un ``ProgressReporter``. ``tool`` (nombre
+        en el registro) decide la política de interacción mientras dura la tarea.
         """
-        if self._busy:
+        view = self._view_or_fail()
+        if not self._interaction.begin(tool):
             self._status("⏳ Espera a que termine el proceso actual.", StatusLevel.WARNING)
             return False
-        self._busy = True
-        self._view_or_fail().set_busy(True)
+        view.set_busy(True)
         self._status(start, StatusLevel.INFO)
 
         def succeeded(result: Any) -> None:
-            self._busy = False
+            self._interaction.end()  # primero se liberan los bloqueos: nada queda atrapado
             self._view_or_fail().set_busy(False)
             on_success(result)
 
         def failed(exc: Exception) -> None:
-            self._busy = False
+            self._interaction.fail()
             self._view_or_fail().set_busy(False)
             logger.error("%s | %s", error, exc, exc_info=exc)  # detalle técnico -> log
             if isinstance(exc, DesignToolError):
@@ -239,8 +270,18 @@ class DesignController:
             if on_error is not None:
                 on_error(exc)
 
-        self._runner.submit(work, succeeded, failed)
+        self._runner.submit(
+            work, succeeded, failed, on_progress=self._on_progress if progress else None
+        )
         return True
+
+    def _on_progress(self, event: ProgressEvent) -> None:
+        """Hilo de la GUI (vía drain). Ignora eventos de una tarea que ya terminó."""
+        if not self._interaction.is_processing:
+            return
+        show = getattr(self._view, "show_progress", None)
+        if show is not None:
+            show(event)
 
     def _show(self, snapshot: ImageSnapshot, message: str) -> None:
         view = self._view_or_fail()

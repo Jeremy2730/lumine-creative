@@ -18,6 +18,7 @@ from core.design_engine import DesignEngine
 from core.image_pipeline import ImagePipeline
 from core.models import ImageSnapshot
 from core.operation import ImageOperation
+from core.progress import ProgressReporter
 
 
 class ProcessingService:
@@ -38,9 +39,14 @@ class ProcessingService:
     def open_image(self, path: Path) -> ImageSnapshot:
         return self._engine.open_image(path)
 
-    def apply_tool(self, name: str, **params: object) -> ImageSnapshot:
-        """Crea la herramienta registrada como ``name`` y la aplica (acumulativo)."""
-        return self._engine.apply(self._registry.create(name, **params))
+    def apply_tool(
+        self, name: str, *, progress: ProgressReporter | None = None, **params: object
+    ) -> ImageSnapshot:
+        """Crea la herramienta registrada como ``name`` y la aplica (acumulativo).
+
+        ``progress`` (opcional) recibe el avance por etapas de las herramientas que lo informan.
+        """
+        return self._engine.apply(self._registry.create(name, **params), progress=progress)
 
     def run_pipeline(
         self,

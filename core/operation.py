@@ -15,6 +15,8 @@ from typing import ClassVar
 
 from PIL import Image
 
+from core.progress import ProgressReporter
+
 
 class ImageOperation(ABC):
     """Operación pura: imagen entrada -> imagen salida.
@@ -34,3 +36,12 @@ class ImageOperation(ABC):
     @abstractmethod
     def apply(self, image: Image.Image) -> Image.Image:
         """Devuelve una NUEVA imagen; no debe mutar la de entrada."""
+
+    def apply_with_progress(self, image: Image.Image, reporter: ProgressReporter) -> Image.Image:
+        """Como ``apply`` pero pudiendo informar de su avance por etapas.
+
+        Opcional: por defecto delega en ``apply`` sin reportar nada (la interfaz
+        mostrará entonces la barra indeterminada). Las herramientas con etapas
+        reales lo sobrescriben.
+        """
+        return self.apply(image)

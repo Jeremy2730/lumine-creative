@@ -1,7 +1,7 @@
 """core/models/processing_state.py
 
 Responsabilidad:
-    - Guardar el estado de trabajo actual: imagen original/actual, ruta de
+    - Guardar el estado de trabajo actual: imagen actual, ruta de
       origen, historial de operaciones aplicadas y estado de
       procesamiento.
     - Entregar una vista inmutable (ImageSnapshot) a las capas superiores.
@@ -65,7 +65,6 @@ class ProcessingState:
     """Estado mutable del motor (uso interno del ``DesignEngine``)."""
 
     source_path: Path | None = None
-    original: Image.Image | None = None
     current: Image.Image | None = None
     operations: list[AppliedOperation] = field(default_factory=list)
     status: ProcessingStatus = ProcessingStatus.IDLE
@@ -77,7 +76,6 @@ class ProcessingState:
     def load(self, path: Path, image: Image.Image) -> None:
         """Inicia una sesión de trabajo con una imagen nueva."""
         self.source_path = path
-        self.original = image
         self.current = image
         self.operations = []
         self.status = ProcessingStatus.IDLE

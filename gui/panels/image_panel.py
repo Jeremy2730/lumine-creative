@@ -148,6 +148,8 @@ class ImagePanel(ctk.CTkFrame):
         self._destroyed = False
         self._space_down = False
         self._pan: _PanDrag | None = None
+        self._zoom_enabled = True  # los decide quien manda (MainWindow según InteractionState);
+        self._pan_enabled = True  # el panel no conoce políticas, solo estos dos permisos
         self._timings: deque[RenderTiming] = deque(maxlen=self._TIMING_HISTORY)
         self._chrome: dict[str, object] = {}  # último estado aplicado a los controles
 
@@ -211,17 +213,30 @@ class ImagePanel(ctk.CTkFrame):
 
     # Acciones de los controles (también útiles desde fuera). Solo cambian el modelo.
     def zoom_in(self) -> None:
-        self._interact(lambda m: m.zoom_by(ZOOM_STEP_BUTTON))
+        self._interact(lambda m: m.zoom_by(ZOOM_STEP_BUTTON), needs="zoom")
 
     def zoom_out(self) -> None:
-        self._interact(lambda m: m.zoom_by(1.0 / ZOOM_STEP_BUTTON))
+        self._interact(lambda m: m.zoom_by(1.0 / ZOOM_STEP_BUTTON), needs="zoom")
 
     def fit_to_window(self) -> None:
-        self._interact(lambda m: m.fit())
+        self._interact(lambda m: m.fit(), needs="zoom")
 
     def actual_size(self) -> None:
         """100 %: un píxel de imagen por píxel físico de pantalla (ver ``viewport_interaction``)."""
-        self._interact(lambda m: m.set_zoom(actual_size_zoom(self._pixel_ratio())))
+        self._interact(lambda m: m.set_zoom(actual_size_zoom(self._pixel_ratio())), needs="zoom")
+
+    def set_navigation_enabled(self, *, zoom: bool, pan: bool) -> None:
+        """Permite o impide zoom y paneo del usuario (rueda, arrastre, barras, botones).
+
+        No cambia la vista ni el modelo; la imagen sigue mostrándose igual y el redimensionado
+        de la ventana sigue funcionando. Un arrastre en curso se cancela al bloquear el paneo.
+        """
+        if self._destroyed:
+            return
+        self._zoom_enabled, self._pan_enabled = zoom, pan
+        if not pan:
+            self._end_pan()
+        self._sync_chrome()
 
     def destroy(self) -> None:
         self._destroyed = True
@@ -320,10 +335,15 @@ class ImagePanel(ctk.CTkFrame):
     def _state(model: ViewportModel) -> tuple:
         return model.zoom, model.position, model.viewport_size, model.fit_mode
 
-    def _interact(self, action: Callable[[ViewportModel], None]) -> bool:
-        """Aplica ``action`` al modelo y, si cambió algo, pide UN repintado. Devuelve si cambió."""
+    def _interact(self, action: Callable[[ViewportModel], None], *, needs: str) -> bool:
+        """Aplica ``action`` al modelo y, si cambió algo, pide UN repintado. Devuelve si cambió.
+
+        ``needs`` ("zoom" o "pan") es el permiso que exige; sin él no se hace nada.
+        """
         model = self._model
         if model is None or self._destroyed:
+            return False
+        if not (self._zoom_enabled if needs == "zoom" else self._pan_enabled):
             return False
         before = self._state(model)
         model.set_viewport_size(*self._viewport_size())  # no hace nada si no cambió
@@ -344,7 +364,7 @@ class ImagePanel(ctk.CTkFrame):
             return
         factor = wheel_zoom_factor(notches)
         anchor = (event.x, event.y)
-        self._interact(lambda m: m.zoom_by(factor, anchor))
+        self._interact(lambda m: m.zoom_by(factor, anchor), needs="zoom")
 
     # --- paneo
     def _on_left_press(self, event) -> None:
@@ -354,7 +374,7 @@ class ImagePanel(ctk.CTkFrame):
 
     def _begin_pan(self, event, button: int) -> None:
         model = self._model
-        if model is None or self._pan is not None:
+        if model is None or self._pan is not None or not self._pan_enabled:
             return
         model.set_viewport_size(*self._viewport_size())
         x, y = model.position
@@ -367,7 +387,9 @@ class ImagePanel(ctk.CTkFrame):
             return
         target_x = drag.origin_x + (event.x - drag.mouse_x)
         target_y = drag.origin_y + (event.y - drag.mouse_y)
-        self._interact(lambda m: m.pan_by(target_x - m.position[0], target_y - m.position[1]))
+        self._interact(
+            lambda m: m.pan_by(target_x - m.position[0], target_y - m.position[1]), needs="pan"
+        )
 
     def _finish_pan(self, button: int) -> None:
         if self._pan is not None and self._pan.button == button:
@@ -415,7 +437,12 @@ class ImagePanel(ctk.CTkFrame):
             delta = -value * step  # avanzar hacia delante mueve la imagen hacia atrás
             model.pan_by(delta if axis == 0 else 0.0, delta if axis == 1 else 0.0)
 
-        self._interact(action)
+        if not self._pan_enabled:  # la barra movió su indicador al arrastrarla: se devuelve a donde está la vista
+            last = self._chrome.get(f"bar{axis}")
+            if last is not None:
+                self._bars[axis].set(*last)
+            return
+        self._interact(action, needs="pan")
 
     # --- repintado
     def _render(self) -> None:
@@ -476,10 +503,10 @@ class ImagePanel(ctk.CTkFrame):
         text = "— %" if model is None else format_zoom_percent(model.zoom, self._pixel_ratio())
         self._set_chrome("label", text, lambda: self._zoom_label.configure(text=text))
         enabled = {
-            self._zoom_in_button: model is not None and model.zoom < model.max_zoom * (1 - 1e-9),
-            self._zoom_out_button: model is not None and model.zoom > model.min_zoom * (1 + 1e-9),
-            self._fit_button: model is not None,
-            self._actual_button: model is not None,
+            self._zoom_in_button: model is not None and self._zoom_enabled and model.zoom < model.max_zoom * (1 - 1e-9),
+            self._zoom_out_button: model is not None and self._zoom_enabled and model.zoom > model.min_zoom * (1 + 1e-9),
+            self._fit_button: model is not None and self._zoom_enabled,
+            self._actual_button: model is not None and self._zoom_enabled,
         }
         for widget, on in enabled.items():
             state = "normal" if on else "disabled"

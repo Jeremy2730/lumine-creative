@@ -26,6 +26,7 @@ from core.exceptions import NoImageLoadedError
 from core.image_pipeline import ImagePipeline
 from core.models import ImageSnapshot, ProcessingState, ProcessingStatus
 from core.operation import ImageOperation
+from core.progress import ProgressReporter
 
 
 class ImageIO(Protocol):
@@ -69,14 +70,17 @@ class DesignEngine:
         self._state.load(path, self._io.load(path))
         return self._state.snapshot()
 
-    def apply(self, operation: ImageOperation) -> ImageSnapshot:
+    def apply(
+        self, operation: ImageOperation, progress: ProgressReporter | None = None
+    ) -> ImageSnapshot:
         """Aplica una única operación sobre la imagen actual (acumulativo)."""
-        return self.run_pipeline(ImagePipeline([operation]))
+        return self.run_pipeline(ImagePipeline([operation]), progress=progress)
 
     def run_pipeline(
         self,
         pipeline: ImagePipeline,
         on_step: Callable[[ImageOperation], None] | None = None,
+        progress: ProgressReporter | None = None,
     ) -> ImageSnapshot:
         """Ejecuta un pipeline sobre la imagen actual. Si falla, el estado no cambia."""
         state = self._state
@@ -84,7 +88,7 @@ class DesignEngine:
             raise NoImageLoadedError()
         state.status = ProcessingStatus.PROCESSING
         try:
-            result = pipeline.run(state.current, on_step=on_step)
+            result = pipeline.run(state.current, on_step=on_step, progress=progress)
         except Exception:
             state.status = ProcessingStatus.ERROR
             raise

@@ -37,10 +37,13 @@ import customtkinter as ctk
 
 from app.controllers.design_controller import DesignController, StatusLevel
 from app.controllers.file_controller import FileController, UnsavedChoice
+from app.interaction import Action
 from app.services.file_service import SaveSuggestion
 from config.settings import Settings
 from core.models import ImageSnapshot
+from core.progress import ProgressEvent
 from gui.components.dialogs import (
+    ask_exit_while_processing,
     ask_flatten_to_jpg,
     ask_image_path,
     ask_save_path,
@@ -88,7 +91,6 @@ class MainWindow(ctk.CTk):
         self._closed = False
         self._size_resolution = SizeResolutionController(controller)
         self._settings = settings
-        self._busy = False
         self._snapshot: ImageSnapshot | None = None
 
         self.title(settings.app_title)
@@ -111,6 +113,7 @@ class MainWindow(ctk.CTk):
         self._build_menu()
         self.protocol("WM_DELETE_WINDOW", self._on_close)
 
+        controller.interaction.subscribe(lambda _state: self._refresh_controls())
         self._refresh_controls()
         self.after(_POLL_MS, self._poll)
 
@@ -166,10 +169,13 @@ class MainWindow(ctk.CTk):
     def show_status(self, message: str, level: StatusLevel) -> None:
         self._status_panel.set_message(message, level)
 
+    def show_progress(self, event: ProgressEvent) -> None:
+        if self._closed:
+            return  # un evento tardío no debe tocar widgets de una ventana destruida
+        self._status_panel.set_progress(event)
+
     def set_busy(self, busy: bool) -> None:
-        self._busy = busy
-        self._status_panel.set_busy(busy)
-        self._refresh_controls()
+        self._status_panel.set_busy(busy)  # barra de progreso; los permisos los da InteractionState
 
     # ---- FileView (lo que pide FileController) ----
     def ask_open_path(self) -> str | None:
@@ -186,6 +192,9 @@ class MainWindow(ctk.CTk):
 
     def set_window_title(self, title: str) -> None:
         self.title(title)
+
+    def ask_exit_while_processing(self, has_unsaved_changes: bool) -> bool:
+        return ask_exit_while_processing(has_unsaved_changes, parent=self)
 
     def exit_application(self) -> None:
         self._closed = True
@@ -223,13 +232,16 @@ class MainWindow(ctk.CTk):
         )
 
     def _refresh_controls(self) -> None:
+        """Lleva a la GUI lo que dice ``InteractionState``: menú y navegación del visor."""
+        can = self._controller.can
         has_image = self._snapshot is not None
         files = self._file_controller
         self._menu.set_state(
-            can_open=files is not None and not self._busy,
-            can_save=files is not None and files.has_document and not self._busy,
-            can_use_tools=has_image and not self._busy,
+            can_open=files is not None and can(Action.OPEN_IMAGE),
+            can_save=files is not None and files.has_document and can(Action.SAVE),
+            can_use_tools=has_image and can(Action.OPEN_TOOL),
         )
+        self._image_panel.set_navigation_enabled(zoom=can(Action.ZOOM), pan=can(Action.PAN))
 
     def _poll(self) -> None:
         try:

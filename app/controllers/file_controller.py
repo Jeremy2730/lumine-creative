@@ -39,6 +39,7 @@ from pathlib import Path
 from typing import Literal, Protocol
 
 from app.controllers.design_controller import DesignController, StatusLevel
+from app.interaction import Action
 from app.services.document_state import DocumentState
 from app.services.file_service import FileService, OpenResult, SaveResult, SaveSuggestion
 from core.exceptions import DesignToolError, NoImageLoadedError
@@ -69,6 +70,9 @@ class FileView(Protocol):
         """True si acepta aplanar sobre blanco; False si cancela."""
 
     def set_window_title(self, title: str) -> None: ...
+
+    def ask_exit_while_processing(self, has_unsaved_changes: bool) -> bool:
+        """True si el usuario acepta cerrar descartando la operación en curso."""
 
     def exit_application(self) -> None: ...
 
@@ -117,7 +121,7 @@ class FileController:
     # ---- acciones públicas (menú, atajos, cierre) ----
     def open_dialog(self) -> None:
         """Abrir…: pide el archivo y converge en ``open_path``."""
-        if self._design.is_busy:
+        if not self._design.can(Action.OPEN_IMAGE):
             self._warn_busy()
             return
         path = self._view_or_fail().ask_open_path()
@@ -126,7 +130,7 @@ class FileController:
 
     def open_path(self, path: str | Path) -> None:
         """Único punto de entrada para abrir un archivo (menú, atajo, futuras vías)."""
-        if self._design.is_busy:
+        if not self._design.can(Action.OPEN_IMAGE):
             self._warn_busy()
             return
         self._confirm_discard(lambda: self._start_open(Path(path)))
@@ -138,9 +142,18 @@ class FileController:
         self._save_as_flow(on_saved=None)
 
     def request_exit(self) -> None:
-        """Salir / cerrar la ventana: respeta los cambios pendientes."""
+        """Salir / cerrar la ventana: respeta los cambios pendientes.
+
+        Con una operación en curso NO se bloquea el cierre (un proceso colgado dejaría la
+        aplicación sin salida): se pide confirmación y, si se acepta, se cierra descartando
+        el resultado de esa operación. Los cambios sin guardar también se pierden, y el
+        aviso lo dice, porque guardar con el motor ocupado no es seguro.
+        """
         if self._design.is_busy:
-            self._design.warn("⏳ Espera a que termine el proceso actual antes de cerrar.")
+            view = self._view_or_fail()
+            if view.ask_exit_while_processing(self.has_unsaved_changes()):
+                self._design.shutdown()
+                view.exit_application()
             return
         self._confirm_discard(self._view_or_fail().exit_application)
 
@@ -183,7 +196,7 @@ class FileController:
 
     # ---- guardar ----
     def _can_save(self) -> bool:
-        if self._design.is_busy:
+        if not self._design.can(Action.SAVE):
             self._warn_busy()
             return False
         if self._document is None or self._service.current_snapshot() is None:

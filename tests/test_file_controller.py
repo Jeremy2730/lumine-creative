@@ -34,6 +34,8 @@ class FakeView:
         self.save_answers: list[str | None] = []
         self.unsaved_answer = "cancel"
         self.flatten_answer = True
+        self.exit_while_busy_answer = False
+        self.exit_while_busy_asked: list[bool] = []
         self.asked = {"open": 0, "save": 0, "unsaved": 0, "flatten": 0}
         self.suggestions = []
         self.exited = 0
@@ -68,6 +70,10 @@ class FakeView:
     def ask_flatten_to_jpg(self):
         self.asked["flatten"] += 1
         return self.flatten_answer
+
+    def ask_exit_while_processing(self, has_unsaved_changes):
+        self.exit_while_busy_asked.append(has_unsaved_changes)
+        return self.exit_while_busy_answer
 
     def set_window_title(self, title):
         self.titles.append(title)
@@ -480,10 +486,33 @@ def test_open_save_and_exit_are_refused_while_a_task_is_running(app):
     app.files.open_path(other)
     app.files.save()
     app.files.save_as()
-    app.files.request_exit()
     assert app.view.asked == {"open": 0, "save": 0, "unsaved": 0, "flatten": 0}  # ni un diálogo
     assert app.view.exited == 0 and app.files.document.origin_path.name == "foto.png"
     wait(app.design)
+
+
+def test_exit_while_a_task_is_running_asks_and_keeps_running_if_declined(app):
+    open_ok(app, make_png(app.src))
+    edit(app)  # hay cambios sin guardar
+    _hold_gate(app)
+    app.view.exit_while_busy_answer = False
+    app.files.request_exit()
+    assert app.view.exit_while_busy_asked == [True]  # avisa de que también se pierden cambios
+    assert app.view.exited == 0 and app.view.asked["unsaved"] == 0
+    wait(app.design)
+    assert not app.design.is_busy  # la tarea terminó con normalidad
+
+
+def test_exit_while_a_task_is_running_closes_and_discards_if_accepted(app):
+    open_ok(app, make_png(app.src))
+    _hold_gate(app)
+    app.view.exit_while_busy_answer = True
+    app.files.request_exit()
+    assert app.view.exit_while_busy_asked == [False] and app.view.exited == 1
+    n = len(app.view.statuses)
+    time.sleep(0.45)
+    app.design.process_pending()  # el resultado de la tarea abandonada no llega a la vista
+    assert len(app.view.statuses) == n
 
 
 def test_a_tool_cannot_start_while_a_file_task_is_running_and_vice_versa(app):

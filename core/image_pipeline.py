@@ -18,6 +18,7 @@ from PIL import Image
 from core.exceptions import DesignToolError, ProcessingError
 from core.models import AppliedOperation
 from core.operation import ImageOperation
+from core.progress import ProgressReporter
 
 
 @dataclass(frozen=True)
@@ -46,6 +47,7 @@ class ImagePipeline:
         self,
         image: Image.Image,
         on_step: Callable[[ImageOperation], None] | None = None,
+        progress: ProgressReporter | None = None,
     ) -> PipelineResult:
         """Aplica todas las operaciones. Es atómico: si una falla, no hay resultado parcial."""
         applied: list[AppliedOperation] = []
@@ -53,7 +55,10 @@ class ImagePipeline:
             if on_step is not None:
                 on_step(operation)
             try:
-                image = operation.apply(image)
+                if progress is not None:
+                    image = operation.apply_with_progress(image, progress)
+                else:
+                    image = operation.apply(image)
             except DesignToolError:
                 raise
             except Exception as exc:  # error técnico inesperado de una herramienta

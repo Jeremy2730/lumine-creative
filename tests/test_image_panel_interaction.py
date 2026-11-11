@@ -550,3 +550,83 @@ def test_render_timings_are_recorded(big):
     assert last.source_size == (3000, 2000) and last.drawn_size[0] > 0
     stats = panel.render_stats()
     assert stats["count"] == len(timings) and stats["max_ms"] >= stats["mean_ms"] > 0
+
+
+# ------------------------------------- bloqueo de navegación (política de interacción)
+def test_blocked_zoom_ignores_wheel_buttons_and_leaves_the_view_untouched(big):
+    panel, model = big.panel, big.panel.viewport
+    panel.set_navigation_enabled(zoom=False, pan=False)
+    state = (model.zoom, model.position, model.fit_mode)
+    panel._on_wheel(ev(200, 150, delta=120))
+    panel.zoom_in(); panel.zoom_out(); panel.actual_size(); panel.fit_to_window()
+    assert (model.zoom, model.position, model.fit_mode) == state
+    assert panel._frame_job is None  # ni siquiera se programó un repintado
+    for button in panel._buttons:
+        assert button.cget("state") == "disabled"
+
+
+def test_blocked_pan_ignores_drag_space_drag_and_scrollbars(big):
+    panel, model = zoomed(big)
+    panel.set_navigation_enabled(zoom=False, pan=False)
+    position = model.position
+    panel._begin_pan(ev(300, 300), 2)
+    assert panel._pan is None
+    panel._move_pan(ev(100, 100), 2)
+    panel._on_space_press(ev()); panel._on_left_press(ev(300, 300)); panel._move_pan(ev(100, 100), 1)
+    assert model.position == position and panel._pan is None
+    shown = panel._hbar.get()
+    panel._hbar.set(0.9, 1.0)  # la barra movió su indicador al arrastrarla…
+    panel._on_scrollbar(0, "moveto", "0.9")
+    assert model.position == position and panel._hbar.get() == shown  # …y vuelve a donde está la vista
+
+
+def test_blocking_cancels_a_drag_in_progress(big):
+    panel, model = zoomed(big)
+    panel._begin_pan(ev(300, 300), 2)
+    assert panel._pan is not None
+    panel.set_navigation_enabled(zoom=False, pan=False)
+    assert panel._pan is None
+    position = model.position
+    panel._move_pan(ev(100, 100), 2)
+    assert model.position == position
+
+
+def test_unblocking_restores_every_interaction(big):
+    panel, model = big.panel, big.panel.viewport
+    panel.set_navigation_enabled(zoom=False, pan=False)
+    panel.set_navigation_enabled(zoom=True, pan=True)
+    start = model.zoom
+    panel._on_wheel(ev(200, 150, delta=120))
+    assert model.zoom > start
+    pump(big.root, 0.1)
+    for button in panel._buttons:
+        assert button.cget("state") == "normal" or button is panel._zoom_in_button
+    panel.actual_size()
+    pump(big.root, 0.1)
+    before = model.position
+    panel._begin_pan(ev(300, 300), 2)
+    panel._move_pan(ev(260, 280), 2)
+    panel._finish_pan(2)
+    assert model.position != before
+
+
+def test_zoom_and_pan_permissions_are_independent(big):
+    panel, model = zoomed(big)
+    panel.set_navigation_enabled(zoom=False, pan=True)
+    zoom, position = model.zoom, model.position
+    panel._on_wheel(ev(100, 100, delta=120))
+    assert model.zoom == zoom
+    panel._begin_pan(ev(300, 300), 2)
+    panel._move_pan(ev(260, 300), 2)
+    panel._finish_pan(2)
+    assert model.position != position
+
+
+def test_the_displayed_image_and_resizing_keep_working_while_locked(big):
+    panel, model = big.panel, big.panel.viewport
+    panel.set_navigation_enabled(zoom=False, pan=False)
+    big.root.geometry("1200x800+0+0")
+    pump(big.root, 0.5)
+    assert model.fit_mode and model.viewport_size == (panel._canvas.winfo_width(), panel._canvas.winfo_height())
+    panel.show(quadrants((3000, 2000)), keep_view=True)  # un resultado se sigue mostrando
+    assert panel._photo is not None

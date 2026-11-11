@@ -5,6 +5,10 @@ Responsabilidad:
       motor, servicio, controladores de diseño y de archivos) y conectarlas.
     - Registrar en un único lugar (build_tool_registry) las herramientas
       disponibles para la aplicación.
+    - Crear UNA vez el ``RembgSessionManager`` (sesión ONNX de rembg) y
+      compartirlo explícitamente con la fábrica de "Quitar fondo", para que
+      el modelo se cargue una sola vez durante la vida de la aplicación; y
+      liberarlo al cerrar (``DesignApplication.run``).
     - Arrancar la ventana principal (DesignApplication.run).
 
 No conoce:
@@ -25,7 +29,7 @@ from app.services.tool_registry import ToolRegistry
 from config.logging_config import setup_logging
 from config.settings import Settings, get_settings
 from core.design_engine import DesignEngine
-from tools.background_remover import BackgroundRemover
+from tools.background_remover import BackgroundRemover, RembgSessionManager
 from tools.comic_effect import ComicEffect
 from tools.image_loader import ImageLoader
 from tools.image_sharpener import ImageSharpener
@@ -34,10 +38,17 @@ from tools.size_resolution import SizeResolutionAdjuster
 logger = logging.getLogger(__name__)
 
 
-def build_tool_registry(settings: Settings) -> ToolRegistry:
-    """Punto único donde se registran las herramientas disponibles."""
+def build_tool_registry(
+    settings: Settings, session_manager: RembgSessionManager | None = None
+) -> ToolRegistry:
+    """Punto único donde se registran las herramientas disponibles.
+
+    ``session_manager`` es la sesión de rembg COMPARTIDA por todas las operaciones de
+    quitar fondo de este registro (se crea una por registro si no se pasa).
+    """
+    sessions = session_manager or RembgSessionManager()
     registry = ToolRegistry()
-    registry.register("remove_background", lambda: BackgroundRemover())
+    registry.register("remove_background", lambda: BackgroundRemover(session_manager=sessions))
     registry.register(
         "comic_effect",
         lambda: ComicEffect(
@@ -70,12 +81,16 @@ def build_image_loader(settings: Settings) -> ImageLoader:
 
 
 def build_processing_service(
-    settings: Settings | None = None, loader: ImageLoader | None = None
+    settings: Settings | None = None,
+    loader: ImageLoader | None = None,
+    session_manager: RembgSessionManager | None = None,
 ) -> ProcessingService:
     """Servicio listo para usar desde consola, tests u otra aplicación."""
     settings = settings or get_settings()
     engine = DesignEngine(loader or build_image_loader(settings))
-    return ProcessingService(engine, build_tool_registry(settings), settings.output_dir)
+    return ProcessingService(
+        engine, build_tool_registry(settings, session_manager), settings.output_dir
+    )
 
 
 def build_controller(settings: Settings | None = None) -> DesignController:
@@ -88,6 +103,7 @@ def build_controller(settings: Settings | None = None) -> DesignController:
 
 def build_controllers(
     settings: Settings | None = None,
+    session_manager: RembgSessionManager | None = None,
 ) -> tuple[DesignController, FileController]:
     """Controlador de diseño + controlador de archivos sobre el MISMO servicio.
 
@@ -96,7 +112,7 @@ def build_controllers(
     """
     settings = settings or get_settings()
     loader = build_image_loader(settings)
-    service = build_processing_service(settings, loader)
+    service = build_processing_service(settings, loader, session_manager)
     design = DesignController(service=service, runner=BackgroundTaskRunner())
     files = FileController(design, FileService(loader, service), settings.app_title)
     return design, files
@@ -111,7 +127,8 @@ class DesignApplication:
     def run(self) -> None:
         setup_logging(self._settings.log_dir)
         logger.info("Iniciando %s", self._settings.app_title)
-        controller, file_controller = build_controllers(self._settings)
+        sessions = RembgSessionManager()  # se carga en la primera operación, nunca al arrancar
+        controller, file_controller = build_controllers(self._settings, sessions)
 
         from gui.main_window import MainWindow  # import diferido: solo aquí se toca la GUI
 
@@ -120,4 +137,7 @@ class DesignApplication:
         )
         controller.attach_view(window)
         file_controller.attach_view(window)
-        window.mainloop()
+        try:
+            window.mainloop()
+        finally:
+            sessions.close()

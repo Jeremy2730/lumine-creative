@@ -97,3 +97,22 @@ def ask_flatten_to_jpg(parent: "tk.Misc | None" = None) -> bool:
             parent=parent,
         )
     )
+
+
+def ask_exit_while_processing(
+    has_unsaved_changes: bool, parent: "tk.Misc | None" = None
+) -> bool:
+    """True si el usuario acepta cerrar aunque haya una operación en curso."""
+    extra = "\nLos cambios sin guardar de la imagen también se perderán." if has_unsaved_changes else ""
+    return bool(
+        messagebox.askokcancel(
+            title="Operación en curso",
+            message=(
+                "Hay una operación en curso.\n\n"
+                "Si cierras ahora, su resultado se descartará." + extra
+                + "\n\n¿Cerrar de todos modos?"
+            ),
+            icon="warning",
+            parent=parent,
+        )
+    )
