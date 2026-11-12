@@ -6,13 +6,19 @@ Responsabilidad:
       pipeline completo, guardar.
     - Garantizar que un fallo a mitad de pipeline no deje el estado a
       medias (solo se actualiza si todo el pipeline tuvo éxito).
+    - Separar CALCULAR de CONFIRMAR: ``preview`` ejecuta un pipeline sin
+      tocar el documento y ``commit`` confirma un resultado previsualizado.
+      ``run_pipeline``/``apply`` son simplemente ``preview`` + ``commit``.
 
 No conoce:
     - GUI, threads, ni algoritmos concretos de imagen (solo ImageOperation).
 
 Notas:
     - No es thread-safe por diseño; BackgroundTaskRunner garantiza una sola
-      llamada a la vez.
+      llamada a la vez. ``preview`` solo LEE el estado (puede ejecutarse en un
+      hilo de trabajo); ``commit`` lo escribe y debe llamarse desde quien lo
+      gobierna (hilo principal). Si el documento cambió entre ambos,
+      ``commit`` lo detecta por ``revision`` y lo rechaza.
 """
 from __future__ import annotations
 
@@ -22,9 +28,9 @@ from typing import Protocol
 
 from PIL import Image
 
-from core.exceptions import NoImageLoadedError
+from core.exceptions import NoImageLoadedError, StalePreviewError
 from core.image_pipeline import ImagePipeline
-from core.models import ImageSnapshot, ProcessingState, ProcessingStatus
+from core.models import ImageSnapshot, PreviewResult, ProcessingState, ProcessingStatus
 from core.operation import ImageOperation
 from core.progress import ProgressReporter
 
@@ -76,6 +82,39 @@ class DesignEngine:
         """Aplica una única operación sobre la imagen actual (acumulativo)."""
         return self.run_pipeline(ImagePipeline([operation]), progress=progress)
 
+    def preview(
+        self,
+        pipeline: ImagePipeline,
+        on_step: Callable[[ImageOperation], None] | None = None,
+        progress: ProgressReporter | None = None,
+    ) -> PreviewResult:
+        """Calcula el resultado de ``pipeline`` sobre la imagen actual SIN confirmarlo.
+
+        No modifica el documento (imagen, historial, revisión ni estado). Si falla,
+        propaga el error y tampoco hay nada que deshacer.
+        """
+        state = self._state
+        if state.current is None:
+            raise NoImageLoadedError()
+        revision = state.revision
+        result = pipeline.run(state.current, on_step=on_step, progress=progress)
+        return PreviewResult(base_revision=revision, image=result.image, applied=result.applied)
+
+    def commit(self, preview: PreviewResult) -> ImageSnapshot:
+        """Confirma un resultado previsualizado. Rechaza uno obsoleto (``StalePreviewError``).
+
+        Un ``PreviewResult`` solo se puede confirmar una vez: al confirmarlo la revisión
+        del documento avanza y el mismo resultado deja de ser aplicable.
+        """
+        state = self._state
+        if state.current is None:
+            raise NoImageLoadedError()
+        if preview.base_revision != state.revision:
+            raise StalePreviewError()
+        state.commit(preview.image, preview.applied)
+        state.status = ProcessingStatus.IDLE
+        return state.snapshot()
+
     def run_pipeline(
         self,
         pipeline: ImagePipeline,
@@ -88,13 +127,11 @@ class DesignEngine:
             raise NoImageLoadedError()
         state.status = ProcessingStatus.PROCESSING
         try:
-            result = pipeline.run(state.current, on_step=on_step, progress=progress)
+            result = self.preview(pipeline, on_step=on_step, progress=progress)
         except Exception:
             state.status = ProcessingStatus.ERROR
             raise
-        state.commit(result.image, result.applied)
-        state.status = ProcessingStatus.IDLE
-        return state.snapshot()
+        return self.commit(result)
 
     def save(self, output_dir: Path) -> Path:
         """Guarda la imagen actual sin sobrescribir archivos existentes."""

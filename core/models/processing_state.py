@@ -12,6 +12,11 @@ No conoce:
 Notas:
     - Pensado para Deshacer/Rehacer: bastaría con guardar aquí una pila de
       (imagen, operaciones) en vez de una sola.
+    - ``revision`` identifica la versión del documento: sube con cada
+      ``load`` y cada ``commit``. Es lo que ``PreviewResult`` recuerda para
+      saber si sigue siendo aplicable. La identidad de ``current`` NO basta:
+      una operación puede devolver la misma imagen que recibió y aun así
+      cambiar el historial.
 """
 from __future__ import annotations
 
@@ -60,6 +65,20 @@ class ImageSnapshot:
         return float(value[0])
 
 
+@dataclass(frozen=True)
+class PreviewResult:
+    """Resultado calculado pero NO confirmado de un pipeline.
+
+    Recuerda la ``revision`` del documento sobre la que se calculó; el motor
+    solo lo confirma (``DesignEngine.commit``) si el documento no ha cambiado
+    desde entonces. Descartarlo es simplemente soltarlo: no hay nada que deshacer.
+    """
+
+    base_revision: int
+    image: Image.Image
+    applied: tuple[AppliedOperation, ...]
+
+
 @dataclass
 class ProcessingState:
     """Estado mutable del motor (uso interno del ``DesignEngine``)."""
@@ -68,6 +87,7 @@ class ProcessingState:
     current: Image.Image | None = None
     operations: list[AppliedOperation] = field(default_factory=list)
     status: ProcessingStatus = ProcessingStatus.IDLE
+    revision: int = 0
 
     @property
     def has_image(self) -> bool:
@@ -79,11 +99,13 @@ class ProcessingState:
         self.current = image
         self.operations = []
         self.status = ProcessingStatus.IDLE
+        self.revision += 1
 
     def commit(self, image: Image.Image, applied: tuple[AppliedOperation, ...]) -> None:
         """Acepta el resultado de un procesamiento exitoso."""
         self.current = image
         self.operations.extend(applied)
+        self.revision += 1
 
     def snapshot(self) -> ImageSnapshot:
         if self.current is None:

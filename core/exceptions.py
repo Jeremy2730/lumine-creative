@@ -47,3 +47,9 @@ class NoImageLoadedError(DesignToolError):
 
 class ProcessingError(DesignToolError):
     """Fallo al aplicar una operación. Sin mensaje propio: lo decide quien orquesta."""
+
+
+class StalePreviewError(DesignToolError):
+    """La previsualización se calculó sobre una versión del documento que ya no es la actual."""
+
+    default_user_message = "⚠️ La imagen cambió mientras se procesaba; el resultado ya no es aplicable."

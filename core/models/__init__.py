@@ -7,8 +7,9 @@ Responsabilidad:
 from core.models.processing_state import (
     AppliedOperation,
     ImageSnapshot,
+    PreviewResult,
     ProcessingState,
     ProcessingStatus,
 )
 
-__all__ = ["AppliedOperation", "ImageSnapshot", "ProcessingState", "ProcessingStatus"]
+__all__ = ["AppliedOperation", "ImageSnapshot", "PreviewResult", "ProcessingState", "ProcessingStatus"]

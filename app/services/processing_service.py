@@ -16,7 +16,7 @@ from pathlib import Path
 from app.services.tool_registry import ToolRegistry
 from core.design_engine import DesignEngine
 from core.image_pipeline import ImagePipeline
-from core.models import ImageSnapshot
+from core.models import ImageSnapshot, PreviewResult
 from core.operation import ImageOperation
 from core.progress import ProgressReporter
 
@@ -47,6 +47,17 @@ class ProcessingService:
         ``progress`` (opcional) recibe el avance por etapas de las herramientas que lo informan.
         """
         return self._engine.apply(self._registry.create(name, **params), progress=progress)
+
+    def preview_tool(
+        self, name: str, *, progress: ProgressReporter | None = None, **params: object
+    ) -> PreviewResult:
+        """Calcula el resultado de la herramienta ``name`` SIN confirmarlo en el documento."""
+        pipeline = ImagePipeline([self._registry.create(name, **params)])
+        return self._engine.preview(pipeline, progress=progress)
+
+    def commit_preview(self, preview: PreviewResult) -> ImageSnapshot:
+        """Confirma un resultado de ``preview_tool`` (rechaza uno obsoleto o ya confirmado)."""
+        return self._engine.commit(preview)
 
     def run_pipeline(
         self,
