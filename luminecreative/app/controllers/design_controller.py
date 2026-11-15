@@ -41,6 +41,16 @@ Notas:
       implementa (es opcional: las vistas sin él siguen funcionando) y solo
       mientras la tarea siga en curso. Las herramientas sin etapas no emiten
       eventos y la vista muestra su barra indeterminada de siempre.
+    - ``sink`` (opcional en ``run_task``/``run_preview``): a quién se entregan el
+      mensaje de estado, el "ocupado" y el progreso de ESA tarea. Por omisión es
+      la vista principal (comportamiento de siempre); una herramienta con ventana
+      propia (Remove) pasa el suyo para que el avance aparezca en su diálogo y
+      no en una ventana principal bloqueada. Solo necesita ``show_status`` y
+      ``set_busy`` (y, opcionalmente, ``show_progress``).
+    - ``run_preview`` calcula una herramienta SIN confirmarla en el documento
+      (``ProcessingService.preview_tool``): el resultado llega a ``on_success`` como
+      ``PreviewResult`` y el documento no cambia hasta que alguien llame al motor
+      para confirmarlo.
     - ``open_image`` y ``save`` son código HEREDADO: la GUI ya no los usa
       (abrir/guardar viven en ``FileController``). Se conservan porque
       pruebas existentes dependen de ellos; pendiente retirarlos al
@@ -178,6 +188,34 @@ class DesignController:
     def remove_background(self) -> None:
         self.run_tool("remove_background")
 
+    def current_snapshot(self) -> ImageSnapshot | None:
+        """Estado actual del documento (``None`` si no hay imagen). Solo lectura."""
+        return self._service.snapshot() if self._service.has_image else None
+
+    def run_preview(
+        self,
+        name: str,
+        *,
+        on_success: Callable[[Any], None],
+        on_error: Callable[[Exception], None] | None = None,
+        sink: Any | None = None,
+        **params: object,
+    ) -> bool:
+        """Como ``run_tool`` pero sin confirmar: entrega un ``PreviewResult`` a ``on_success``."""
+        if not self._require_image():
+            return False
+        msg = _TOOL_MESSAGES[name]
+        return self.run_task(
+            start=msg.start,
+            work=lambda reporter: self._service.preview_tool(name, progress=reporter, **params),
+            on_success=on_success,
+            error=msg.error,
+            on_error=on_error,
+            progress=True,
+            tool=name,
+            sink=sink,
+        )
+
     def comic_effect(self) -> None:
         self.run_tool("comic_effect")
 
@@ -235,6 +273,7 @@ class DesignController:
         on_error: Callable[[Exception], None] | None = None,
         progress: bool = False,
         tool: str | None = None,
+        sink: Any | None = None,
     ) -> bool:
         """Ejecuta ``work`` en segundo plano con la compuerta de "ocupado".
 
@@ -244,42 +283,50 @@ class DesignController:
         tarea se rechazó por estar ocupado. ``on_error`` (opcional) se
         invoca DESPUÉS del tratamiento estándar del error (log + mensaje).
         Con ``progress=True``, ``work`` recibe un ``ProgressReporter``. ``tool`` (nombre
-        en el registro) decide la política de interacción mientras dura la tarea.
+        en el registro) decide la política de interacción mientras dura la tarea. ``sink``
+        (opcional) recibe el estado, el "ocupado" y el progreso en lugar de la vista principal.
         """
-        view = self._view_or_fail()
+        self._view_or_fail()  # sin vista asociada no se despacha nada (como siempre)
+
+        def target() -> Any:
+            return sink if sink is not None else self._view_or_fail()
+
         if not self._interaction.begin(tool):
             self._status("⏳ Espera a que termine el proceso actual.", StatusLevel.WARNING)
             return False
-        view.set_busy(True)
-        self._status(start, StatusLevel.INFO)
+        target().set_busy(True)
+        target().show_status(start, StatusLevel.INFO)
 
         def succeeded(result: Any) -> None:
             self._interaction.end()  # primero se liberan los bloqueos: nada queda atrapado
-            self._view_or_fail().set_busy(False)
+            target().set_busy(False)
             on_success(result)
 
         def failed(exc: Exception) -> None:
             self._interaction.fail()
-            self._view_or_fail().set_busy(False)
+            target().set_busy(False)
             logger.error("%s | %s", error, exc, exc_info=exc)  # detalle técnico -> log
             if isinstance(exc, DesignToolError):
                 message = exc.display_message(error)
             else:
                 message = error
-            self._status(message, StatusLevel.ERROR)
+            target().show_status(message, StatusLevel.ERROR)
             if on_error is not None:
                 on_error(exc)
 
         self._runner.submit(
-            work, succeeded, failed, on_progress=self._on_progress if progress else None
+            work,
+            succeeded,
+            failed,
+            on_progress=(lambda event: self._on_progress(event, sink)) if progress else None,
         )
         return True
 
-    def _on_progress(self, event: ProgressEvent) -> None:
+    def _on_progress(self, event: ProgressEvent, sink: Any | None = None) -> None:
         """Hilo de la GUI (vía drain). Ignora eventos de una tarea que ya terminó."""
         if not self._interaction.is_processing:
             return
-        show = getattr(self._view, "show_progress", None)
+        show = getattr(sink if sink is not None else self._view, "show_progress", None)
         if show is not None:
             show(event)
 

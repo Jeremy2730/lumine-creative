@@ -35,6 +35,9 @@ _COLORS: dict[StatusLevel, tuple[str, str]] = {
 }
 
 
+STATUS_COLORS = _COLORS  # color por nivel; lo reutilizan otros contenedores de estado (Remove)
+
+
 class StatusPanel(ctk.CTkFrame):
     def __init__(self, master) -> None:
         super().__init__(master, corner_radius=12)

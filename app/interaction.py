@@ -32,6 +32,18 @@ Notas:
     - Una herramienta sin entrada en ``TOOL_POLICIES`` usa ``DEFAULT_POLICY``
       (el comportamiento heredado), de modo que añadir una herramienta no
       cambia el de las demás.
+    - Espacio de trabajo (``enter_workspace``/``leave_workspace``): una
+      herramienta con ventana propia (Remove) abre un espacio de trabajo
+      mientras dura. Hay dos ámbitos, con responsabilidades separadas:
+        * ``Scope.MAIN`` (el de siempre): la aplicación principal. Con un
+          espacio abierto TODO está bloqueado, procese o no.
+        * ``Scope.TOOL``: lo que hay DENTRO del espacio abierto (su visor).
+          En reposo todo está permitido; mientras se procesa rige la política
+          de la herramienta (``FULL_LOCK`` bloquea zoom y paneo de su visor).
+      Sin espacio abierto nada cambia: ``can(action)`` responde igual que
+      antes y ``can(action, Scope.TOOL)`` es siempre ``False``. Los botones
+      propios de la ventana de la herramienta (Quitar fondo, Cancelar, Salir)
+      no pasan por aquí: los decide el estado de su propia sesión.
 """
 from __future__ import annotations
 
@@ -44,6 +56,7 @@ logger = logging.getLogger(__name__)
 
 __all__ = [
     "Action",
+    "Scope",
     "AppState",
     "InteractionPolicy",
     "InteractionState",
@@ -58,6 +71,13 @@ class AppState(str, Enum):
     IDLE = "idle"
     PROCESSING = "processing"
     ERROR = "error"
+
+
+class Scope(str, Enum):
+    """Desde dónde se pregunta un permiso: la aplicación principal o el espacio de una herramienta."""
+
+    MAIN = "main"
+    TOOL = "tool"
 
 
 class Action(str, Enum):
@@ -106,6 +126,7 @@ class InteractionState:
         self._default = default
         self._state = AppState.IDLE
         self._tool: str | None = None
+        self._workspace: str | None = None
         self._observers: list[Callable[[InteractionState], None]] = []
 
     @property
@@ -122,13 +143,24 @@ class InteractionState:
         return self._tool
 
     @property
+    def workspace(self) -> str | None:
+        """Herramienta con espacio de trabajo abierto (``None`` si no hay ninguno)."""
+        return self._workspace
+
+    @property
     def policy(self) -> InteractionPolicy | None:
         """Política vigente; solo existe mientras se procesa."""
         if not self.is_processing:
             return None
         return self._policies.get(self._tool, self._default) if self._tool else self._default
 
-    def can(self, action: Action) -> bool:
+    def can(self, action: Action, scope: Scope = Scope.MAIN) -> bool:
+        """¿Está permitida ``action``? ``scope`` dice desde dónde se pregunta (ver notas)."""
+        if scope is Scope.TOOL:
+            if self._workspace is None:
+                return False  # no hay espacio de herramienta del que preguntar
+        elif self._workspace is not None:
+            return False  # la aplicación principal está bloqueada mientras hay un espacio abierto
         policy = self.policy
         return True if policy is None else policy.allows(action)
 
@@ -155,6 +187,21 @@ class InteractionState:
         if self._state is AppState.ERROR:
             self._set(AppState.IDLE, None)
 
+    # ---- espacio de trabajo ----
+    def enter_workspace(self, tool: str) -> bool:
+        """Abre el espacio de ``tool``. ``False`` (sin cambios) si se procesa o ya hay uno abierto."""
+        if self.is_processing or self._workspace is not None:
+            return False
+        self._workspace = tool
+        self._notify()
+        return True
+
+    def leave_workspace(self) -> None:
+        """Cierra el espacio abierto y devuelve la aplicación principal a su estado normal."""
+        if self._workspace is not None:
+            self._workspace = None
+            self._notify()
+
     # ---- observadores ----
     def subscribe(self, observer: Callable[[InteractionState], None]) -> Callable[[], None]:
         """Registra ``observer`` (se llama en el hilo principal tras cada cambio). Devuelve la baja."""
@@ -170,6 +217,9 @@ class InteractionState:
         if (state, tool) == (self._state, self._tool):
             return
         self._state, self._tool = state, tool
+        self._notify()
+
+    def _notify(self) -> None:
         for observer in list(self._observers):
             try:
                 observer(self)

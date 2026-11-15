@@ -35,6 +35,15 @@ Notas:
       cuando exista zoom interactivo): LANCZOS al reducir, BICUBIC al
       ampliar (suave, como se veía hasta ahora) y copia exacta de píxeles
       al 100 % sobre coordenadas enteras.
+    - Tablero de transparencia (``set_checkerboard``, desactivado por
+      omisión: el visor principal no cambia): se compone SOLO sobre el recorte
+      visible, ya remuestreado, y siempre produce una imagen NUEVA y opaca;
+      la imagen de origen y los niveles reducidos no se tocan, así que el
+      tablero nunca llega a los píxeles del documento ni al guardado. Si el
+      recorte no tiene transparencia real (todo opaco) se devuelve tal cual.
+      Las celdas tienen un tamaño constante en pantalla (no crecen con el
+      zoom) y el patrón se ancla a la posición de la imagen en el viewport,
+      de modo que acompaña al paneo. Las dos tonalidades son neutras.
     - Un solo hilo: el renderizado ocurre en el hilo de la interfaz y no
       introduce concurrencia. Las optimizaciones de render más agresivas
       (baja calidad durante la interacción, niveles en segundo plano) se
@@ -49,7 +58,11 @@ from PIL import Image
 
 from gui.viewport import ViewportModel
 
-__all__ = ["RenderedView", "ViewportRenderer"]
+__all__ = ["RenderedView", "ViewportRenderer", "CHECKER_CELL_PX", "CHECKER_LIGHT", "CHECKER_DARK"]
+
+CHECKER_CELL_PX = 8  # lado de cada cuadrado del tablero, en píxeles de pantalla
+CHECKER_LIGHT = (242, 242, 242, 255)
+CHECKER_DARK = (204, 204, 204, 255)
 
 _INTEGER_TOLERANCE = 1e-6  # para decidir si un recorte cae en coordenadas enteras
 
@@ -75,6 +88,23 @@ class ViewportRenderer:
         self._levels: dict[int, Image.Image] = {}
         self._last_key: tuple | None = None
         self._last_view: RenderedView | None = None
+        self._checker = False
+        self._checker_cell = CHECKER_CELL_PX
+        self._pattern: tuple[tuple[int, int, int], Image.Image] | None = None
+
+    @property
+    def checkerboard(self) -> bool:
+        return self._checker
+
+    def set_checkerboard(self, enabled: bool, cell: int = CHECKER_CELL_PX) -> None:
+        """Activa o desactiva el tablero tras las zonas transparentes (solo visual)."""
+        if isinstance(cell, bool) or not isinstance(cell, int) or cell < 1:
+            raise ValueError(f"cell debe ser un entero positivo, recibido {cell!r}.")
+        if (bool(enabled), cell) == (self._checker, self._checker_cell):
+            return
+        self._checker, self._checker_cell = bool(enabled), cell
+        self._last_key = None  # lo ya renderizado ya no vale
+        self._last_view = None
 
     @property
     def source(self) -> Image.Image | None:
@@ -107,7 +137,8 @@ class ViewportRenderer:
         area = model.visible_area()
         if area is None:
             return None
-        key = (area, model.zoom)
+        phase = self._checker_phase(model, area) if self._checker else None
+        key = (area, model.zoom, phase)
         if key == self._last_key and self._last_view is not None:
             return self._last_view  # nada cambió: no se vuelve a renderizar
 
@@ -125,6 +156,8 @@ class ViewportRenderer:
             level.size,
         )
         pixels = self._pixels(level, box, size, model.zoom)
+        if phase is not None:
+            pixels = self._over_checkerboard(pixels, phase)
         view = RenderedView(image=pixels, x=x0, y=y0)
         self._last_key, self._last_view = key, view
         return view
@@ -148,6 +181,43 @@ class ViewportRenderer:
         level = self._levels[base_factor].reduce(factor // base_factor)
         self._levels[factor] = level
         return level
+
+    def _checker_phase(self, model: ViewportModel, area) -> tuple[int, int]:
+        """Desfase del patrón: el tablero queda anclado a la imagen, no a la pantalla."""
+        period = 2 * self._checker_cell
+        x0, y0 = area.destination[0], area.destination[1]
+        return (x0 - round(model.position[0])) % period, (y0 - round(model.position[1])) % period
+
+    def _over_checkerboard(self, pixels: Image.Image, phase: tuple[int, int]) -> Image.Image:
+        """``pixels`` sobre el tablero (imagen nueva, opaca). Sin transparencia real, tal cual."""
+        if pixels.mode not in ("RGBA", "LA", "PA") and "transparency" not in pixels.info:
+            return pixels
+        rgba = pixels if pixels.mode == "RGBA" else pixels.convert("RGBA")
+        if rgba.getchannel("A").getextrema()[0] >= 255:
+            return pixels  # todo opaco: nada que mostrar detrás
+        width, height = rgba.size
+        base = self._pattern_base(width, height)
+        pattern = base.crop((phase[0], phase[1], phase[0] + width, phase[1] + height))
+        return Image.alpha_composite(pattern, rgba).convert("RGB")
+
+    def _pattern_base(self, width: int, height: int) -> Image.Image:
+        """Tablero que cubre ``width × height`` más un periodo (para recortar con cualquier desfase)."""
+        cell = self._checker_cell
+        key = (width, height, cell)
+        if self._pattern is not None and self._pattern[0] == key:
+            return self._pattern[1]
+        period = 2 * cell
+        tile = Image.new("RGBA", (period, period), CHECKER_LIGHT)
+        tile.paste(CHECKER_DARK, (0, 0, cell, cell))
+        tile.paste(CHECKER_DARK, (cell, cell, period, period))
+        row = Image.new("RGBA", (width + period, period))
+        for x in range(0, width + period, period):
+            row.paste(tile, (x, 0))
+        base = Image.new("RGBA", (width + period, height + period))
+        for y in range(0, height + period, period):
+            base.paste(row, (0, y))
+        self._pattern = (key, base)
+        return base
 
     @staticmethod
     def _clamped_box(

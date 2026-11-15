@@ -22,6 +22,10 @@ Notas:
       pero sigue creado y alimentado con ``set_operations``: el historial
       de operaciones y su funcionamiento interno no cambian, y volver a
       mostrarlo es una sola llamada a ``grid()``.
+    - "Quitar fondo" ya no procesa: abre el espacio de trabajo de Remove (su
+      ventana y su visor propios; ver tools/remove). Mientras está abierto,
+      ``InteractionState`` bloquea esta ventana y la X (``_on_close``) no la
+      cierra: Remove termina con OK o Cancelar.
     - Cada ``show_snapshot`` indica al visor si la imagen continúa el mismo
       documento (``_continues_document``: mismo origen y una operación más
       que antes) para conservar zoom y encuadre, o si es una imagen nueva
@@ -53,6 +57,8 @@ from gui.components.menu_bar import MenuBar, MenuCallbacks, bind_file_shortcuts
 from gui.panels.image_panel import ImagePanel
 from gui.panels.status_panel import StatusPanel
 from gui.panels.tools_panel import ToolsPanel
+from tools.remove import RemoveController, RemoveState
+from tools.remove.dialog import RemoveDialog
 from tools.size_resolution import SizeResolutionController
 from tools.size_resolution.dialog import SizeResolutionDialog
 
@@ -90,6 +96,8 @@ class MainWindow(ctk.CTk):
         self._file_controller = file_controller
         self._closed = False
         self._size_resolution = SizeResolutionController(controller)
+        self._remove: RemoveController | None = None  # sesión de Remove abierta (si la hay)
+        self._remove_dialog: RemoveDialog | None = None
         self._settings = settings
         self._snapshot: ImageSnapshot | None = None
 
@@ -131,7 +139,7 @@ class MainWindow(ctk.CTk):
                 save_as=save_as_action,
                 exit=self._on_close,
                 tools=(
-                    ("Quitar fondo", self._controller.remove_background),
+                    ("Quitar fondo", self._on_remove),
                     ("Semitono", self._controller.comic_effect),
                     ("Tamaño y resolución…", self._on_size_resolution),
                     ("Dar nitidez", self._controller.sharpen),
@@ -203,10 +211,28 @@ class MainWindow(ctk.CTk):
     # ---- eventos de la GUI ----
     def _on_close(self) -> None:
         """Cerrar con la X y "Salir" convergen aquí (respeta cambios pendientes)."""
+        if self._remove is not None and self._remove.state is not RemoveState.CLOSED:
+            # Con Remove abierto no se cierra Lumine: Remove termina con OK o Cancelar.
+            self._remove.refuse_close()
+            if self._remove_dialog is not None:
+                self._remove_dialog.lift()
+            return
         if self._file_controller is not None:
             self._file_controller.request_exit()
         else:
             self.exit_application()
+
+    def _on_remove(self) -> None:
+        """Abre el espacio de trabajo de Remove. NO procesa: eso lo pide el usuario en su ventana."""
+        session = RemoveController(self._controller)
+        if not session.open():
+            return
+        try:
+            dialog = RemoveDialog(self, session)
+        except Exception:
+            session.close()  # si la ventana no se pudo construir, Lumine no puede quedar bloqueado
+            raise
+        self._remove, self._remove_dialog = session, dialog
 
     def _on_size_resolution(self) -> None:
         if self._snapshot is None:
