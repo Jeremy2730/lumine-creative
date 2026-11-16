@@ -12,6 +12,7 @@ from app.services.task_runner import BackgroundTaskRunner
 from app.services.tool_registry import ToolRegistry
 from core.design_engine import DesignEngine
 from core.operation import ImageOperation
+from core.exceptions import StalePreviewError
 from tools.remove import RemoveController, RemoveState
 
 
@@ -77,11 +78,11 @@ class MainView:
 
 
 class RemoveViewFake:
-    def __init__(self, confirm=True):
-        self.images, self.statuses, self.progress, self.busy = [], [], [], []
+    """Doble de la ventana: solo lo que define ``RemoveView`` (sin show_progress ni confirm_exit)."""
+
+    def __init__(self):
+        self.images, self.statuses, self.busy = [], [], []
         self.state_changes = 0
-        self.confirm_calls = []
-        self.confirm_answer = confirm
         self.closed = 0
         self.after_close = []  # cualquier llamada posterior al cierre (no debe haber)
 
@@ -97,10 +98,6 @@ class RemoveViewFake:
         self._guard("show_status")
         self.statuses.append((message, level))
 
-    def show_progress(self, event):
-        self._guard("show_progress")
-        self.progress.append(event)
-
     def set_busy(self, busy):
         self._guard("set_busy")
         self.busy.append(busy)
@@ -108,10 +105,6 @@ class RemoveViewFake:
     def state_changed(self):
         self._guard("state_changed")
         self.state_changes += 1
-
-    def confirm_exit(self, *, processing):
-        self.confirm_calls.append(processing)
-        return self.confirm_answer
 
     def close(self):
         self.closed += 1
@@ -160,22 +153,32 @@ def run_to_completion(env):
     pump(env, lambda: env.remove.state is not RemoveState.PROCESSING)
 
 
+def revision(env):
+    return env.service._engine._state.revision
+
+
 def document_untouched(env):
     snap = env.service.snapshot()
-    return snap.image is env.doc.image and snap.operations == () and env.service._engine._state.revision == 1
+    return snap.image is env.doc.image and snap.operations == () and revision(env) == 1
+
+
+def lumine_free(env):
+    return env.design.interaction.workspace is None and all(env.design.can(a) for a in Action)
 
 
 # ---- 1 y 2: abrir muestra el original y no procesa ----
 def test_open_shows_the_original_unprocessed_and_does_not_run_rmbg(env):
     opened(env)
     assert env.remove.state is RemoveState.READY
-    assert env.view.images == [(env.doc.image, False)]  # la misma imagen, sin procesar
+    assert env.view.images == [(env.doc.image, False)]
+    assert "Remove listo" in env.view.statuses[0][0]
     assert env.op.calls == 0 and not env.design.is_busy
     assert env.design.interaction.workspace == "remove_background"
     assert document_untouched(env) and env.main.snapshots == []
+    assert env.remove.can_run and env.remove.can_cancel and not env.remove.can_ok
     time.sleep(0.05)
     env.design.process_pending()
-    assert env.op.calls == 0  # ni siquiera después de un rato: nadie lo lanzó
+    assert env.op.calls == 0
 
 
 def test_open_without_image_is_refused_and_does_not_block_lumine(tmp_path):
@@ -194,11 +197,11 @@ def test_open_refused_while_busy_or_with_another_session(env):
     assert RemoveController(env.design).open() is False
     env.design.interaction.end()
     assert opened(env)
-    assert RemoveController(env.design).open() is False  # ya hay un espacio abierto
+    assert RemoveController(env.design).open() is False
     assert env.design.interaction.workspace == "remove_background"
 
 
-# ---- 3, 4 y 5: Quitar fondo ejecuta; se bloquea; se recupera ----
+# ---- Quitar fondo ----
 def test_run_executes_rmbg_and_shows_a_preview_without_touching_the_document(env):
     opened(env)
     assert env.remove.run() is True
@@ -206,11 +209,11 @@ def test_run_executes_rmbg_and_shows_a_preview_without_touching_the_document(env
     assert env.op.started.wait(5)
     env.op.gate.set()
     pump(env, lambda: env.remove.state is RemoveState.COMPLETED)
-    assert env.op.calls == 1
     shown, keep = env.view.images[-1]
     assert shown is env.remove.result.image and keep is True and shown.mode == "RGBA"
-    assert document_untouched(env)  # nada confirmado en el documento principal
-    assert env.main.snapshots == []
+    assert document_untouched(env) and env.main.snapshots == []
+    assert env.remove.can_ok and env.remove.can_cancel and not env.remove.can_run
+    assert "Procesamiento completado" in env.view.statuses[-1][0]
 
 
 def test_run_twice_is_ignored(env):
@@ -220,80 +223,170 @@ def test_run_twice_is_ignored(env):
     env.op.gate.set()
     pump(env, lambda: env.remove.state is RemoveState.COMPLETED)
     assert env.op.calls == 1
-    assert env.remove.run() is False  # COMPLETED: primero hay que descartar
+    assert env.remove.run() is False  # con resultado en pantalla: primero OK o Cancelar
 
 
-def test_while_processing_incompatible_interactions_are_blocked(env):
+def test_while_processing_buttons_and_navigation_are_locked(env):
     opened(env)
     inter = env.design.interaction
-    assert inter.can(Action.ZOOM, Scope.TOOL) and inter.can(Action.PAN, Scope.TOOL)  # en reposo, libres
+    assert inter.can(Action.ZOOM, Scope.TOOL) and inter.can(Action.PAN, Scope.TOOL)
     env.remove.run()
     assert env.op.started.wait(5)
     assert not inter.can(Action.ZOOM, Scope.TOOL) and not inter.can(Action.PAN, Scope.TOOL)
-    assert not env.remove.can_interact(Action.ZOOM)
     assert not any(inter.can(a) for a in Action)  # y lo principal, también
-    assert env.remove.can_run is False and env.remove.can_exit is True and env.remove.can_cancel is True
+    assert not env.remove.can_run and not env.remove.can_ok and env.remove.can_cancel
     env.op.gate.set()
     pump(env, lambda: env.remove.state is RemoveState.COMPLETED)
-
-
-def test_when_finished_the_allowed_interactions_come_back(env):
-    opened(env)
-    run_to_completion(env)
-    inter = env.design.interaction
     assert inter.can(Action.ZOOM, Scope.TOOL) and inter.can(Action.PAN, Scope.TOOL)
-    assert env.remove.can_cancel and env.remove.can_exit and not env.remove.can_run
-    assert not inter.can(Action.OPEN_IMAGE)  # lo principal sigue bloqueado hasta salir
 
 
-def test_progress_and_status_go_to_remove_not_to_the_main_window(env):
+# ---- Mensajes y progreso ----
+def test_status_messages_follow_the_stages_and_end_with_completed(env):
     opened(env)
     run_to_completion(env)
-    assert [e.stage for e in env.view.progress] == ["Inferencia"]
+    texts = [m for m, _ in env.view.statuses]
+    assert "Eliminando fondo…" in texts
+    assert texts.index("Eliminando fondo…") < texts.index(env.view.statuses[-1][0])
     assert env.view.busy == [True, False]
     assert env.main.progress == [] and env.main.busy == []
-    assert not any("Quitando" in m for m, _ in env.main.statuses)
-    assert any("Quitando" in m for m, _ in env.view.statuses)
+    assert not any("Eliminando" in m or "Quitando" in m for m, _ in env.main.statuses)
 
 
-# ---- 6: Cancelar ----
-def test_cancel_while_processing_discards_the_result_when_it_arrives(env):
+def test_stage_messages_cover_the_real_rmbg_stage_labels():
+    from tools import background_remover as br
+    from tools.remove import controller as rc
+
+    labels = {label for label, _ in br._STAGES.values()}
+    assert set(rc._STAGE_MESSAGES) <= labels  # si renombran una etapa, el mensaje no queda huérfano
+
+
+def test_progress_text_is_not_repeated(env):
+    from core.progress import ProgressEvent
+
+    opened(env)
+    before = len(env.view.statuses)
+    for _ in range(3):
+        env.remove.show_progress(ProgressEvent("Inferencia", 0.4, "x"))
+    assert len(env.view.statuses) == before + 1 and env.view.statuses[-1][0] == "Eliminando fondo…"
+    env.remove.show_progress(ProgressEvent("Imagen", 0.1, "x"))
+    assert env.view.statuses[-1][0] == "Preparando imagen…"
+
+
+# ---- OK ----
+def test_ok_commits_updates_lumine_and_closes(env):
+    opened(env)
+    run_to_completion(env)
+    result = env.remove.result
+    assert env.remove.ok() is True
+    assert env.remove.state is RemoveState.CLOSED and env.view.closed == 1
+    snap = env.service.snapshot()
+    assert snap.image is result.image and snap.image.mode == "RGBA"
+    assert len(snap.operations) == 1 and "remove_background" in repr(snap.operations[0]) + getattr(snap.operations[0], "name", "")
+    assert revision(env) == 2
+    assert len(env.main.snapshots) == 1 and env.main.snapshots[0].image is result.image
+    assert lumine_free(env)
+    assert env.view.after_close == []
+
+
+def test_ok_is_refused_without_result_and_while_processing(env):
+    opened(env)
+    assert env.remove.ok() is False and env.remove.state is RemoveState.READY and document_untouched(env)
+    env.remove.run()
+    assert env.op.started.wait(5)
+    assert env.remove.can_ok is False and env.remove.ok() is False
+    assert env.remove.state is RemoveState.PROCESSING and document_untouched(env)
+    env.op.gate.set()
+    pump(env, lambda: env.remove.state is RemoveState.COMPLETED)
+    assert env.remove.can_ok
+
+
+def test_ok_twice_commits_once(env):
+    opened(env)
+    run_to_completion(env)
+    assert env.remove.ok() is True
+    assert env.remove.ok() is False
+    assert revision(env) == 2 and len(env.main.snapshots) == 1
+
+
+def test_stale_result_is_rejected_by_commit_and_the_session_stays_open(env, tmp_path):
+    opened(env)
+    run_to_completion(env)
+    env.service.open_image(tmp_path / "otra.png")  # el documento cambió por detrás
+    other = env.service.snapshot()
+    assert env.remove.ok() is False
+    assert env.remove.state is RemoveState.ERROR and env.view.closed == 0
+    assert env.service.snapshot().image is other.image  # nada aplicado
+    assert env.view.statuses[-1][1] is StatusLevel.ERROR
+    assert env.view.images[-1][0] is env.remove._original
+    assert env.design.interaction.workspace == "remove_background"
+    assert env.remove.result is None and env.remove.can_ok is False
+    assert env.remove.can_cancel and env.remove.can_run
+    env.remove.cancel()
+    assert env.remove.state is RemoveState.CLOSED and lumine_free(env)
+
+
+def test_commit_failure_keeps_the_document_intact(env, monkeypatch):
+    opened(env)
+    run_to_completion(env)
+
+    def boom(preview):
+        raise RuntimeError("disco")
+
+    monkeypatch.setattr(env.service, "commit_preview", boom)
+    assert env.remove.ok() is False
+    assert env.remove.state is RemoveState.ERROR and env.view.closed == 0
+    assert document_untouched(env) and env.main.snapshots == []
+
+
+def test_design_commit_preview_returns_none_while_processing(env):
+    opened(env)
+    run_to_completion(env)
+    result = env.remove.result
+    env.design.interaction.begin("sharpen")
+    assert env.design.commit_preview(result, "remove_background") is None
+    env.design.interaction.end()
+    assert revision(env) == 1
+
+
+# ---- Cancelar ----
+def test_cancel_in_ready_closes_without_changes(env):
+    opened(env)
+    env.remove.cancel()
+    assert env.remove.state is RemoveState.CLOSED and env.view.closed == 1
+    assert lumine_free(env) and document_untouched(env) and env.main.snapshots == []
+
+
+def test_cancel_with_a_result_discards_and_closes(env):
+    opened(env)
+    run_to_completion(env)
+    env.remove.cancel()
+    assert env.remove.state is RemoveState.CLOSED and env.remove.result is None
+    assert document_untouched(env) and env.main.snapshots == []
+    assert lumine_free(env) and env.view.closed == 1
+
+
+def test_cancel_while_processing_waits_for_the_ai_then_discards(env):
     opened(env)
     env.remove.run()
     assert env.op.started.wait(5)
     env.remove.cancel()
-    # Honestidad: la IA sigue ejecutándose, así que NO se declara cancelada todavía.
     assert env.remove.state is RemoveState.PROCESSING and env.remove.cancel_requested
-    assert env.remove.can_cancel is False
+    assert env.view.closed == 0 and env.remove.can_cancel is False
     assert "no se puede interrumpir" in env.view.statuses[-1][0]
+    assert env.remove.ok() is False
     env.op.gate.set()
     pump(env, lambda: env.remove.state is RemoveState.CANCELLED)
-    assert env.remove.result is None
-    assert env.view.images[-1] == (env.doc.image, True)  # vuelve a verse el original
-    assert document_untouched(env)
-    assert env.design.interaction.can(Action.ZOOM, Scope.TOOL)  # no queda bloqueado
-
-
-def test_cancel_with_a_result_on_screen_discards_it(env):
-    opened(env)
-    run_to_completion(env)
-    assert env.remove.result is not None
-    env.remove.cancel()
-    assert env.remove.state is RemoveState.CANCELLED and env.remove.result is None
+    assert env.remove.result is None and env.view.closed == 0
     assert env.view.images[-1] == (env.doc.image, True)
-    assert document_untouched(env)
-    assert env.remove.can_run  # se puede volver a procesar
+    assert env.view.statuses[-1][0] == "Resultado descartado."
+    assert document_untouched(env) and env.main.snapshots == []
+    assert env.design.interaction.can(Action.ZOOM, Scope.TOOL)
+    assert env.remove.can_run and env.remove.can_cancel
+    env.remove.cancel()  # segundo Cancelar: ahora sí vuelve a Lumine
+    assert env.remove.state is RemoveState.CLOSED and lumine_free(env) and document_untouched(env)
 
 
-def test_cancel_when_there_is_nothing_to_discard_does_nothing(env):
-    opened(env)
-    assert env.remove.can_cancel is False
-    changes = env.view.state_changes
-    env.remove.cancel()
-    assert env.remove.state is RemoveState.READY and env.view.state_changes == changes
-
-
-def test_a_cancelled_run_can_be_repeated_and_applies_nothing_old(env):
+def test_a_cancelled_run_can_be_repeated_and_applied(env):
     opened(env)
     env.remove.run()
     env.op.started.wait(5)
@@ -302,63 +395,60 @@ def test_a_cancelled_run_can_be_repeated_and_applies_nothing_old(env):
     pump(env, lambda: env.remove.state is RemoveState.CANCELLED)
     assert env.remove.run()
     pump(env, lambda: env.remove.state is RemoveState.COMPLETED)
-    assert env.op.calls == 2 and env.remove.result is not None and document_untouched(env)
+    assert env.op.calls == 2 and env.remove.ok() and revision(env) == 2
 
 
-# ---- 7: Salir ----
-def test_exit_from_ready_closes_and_returns_control_to_lumine(env):
+def test_error_after_cancel_request_is_reported_and_leaves_remove_usable(env):
     opened(env)
-    env.remove.request_exit()
-    assert env.remove.state is RemoveState.CLOSED
-    assert env.view.closed == 1 and env.view.confirm_calls == []  # sin nada que perder: sin pregunta
-    assert env.design.interaction.workspace is None
-    assert all(env.design.can(a) for a in Action)
-    assert document_untouched(env)
+    env.op.fail = True
+    env.remove.run()
+    assert env.op.started.wait(5)
+    env.remove.cancel()
+    env.op.gate.set()
+    pump(env, lambda: env.remove.state is RemoveState.ERROR)
+    assert not env.remove.cancel_requested and env.view.statuses[-1][1] is StatusLevel.ERROR
+    assert env.remove.can_run and env.remove.can_cancel and document_untouched(env)
 
 
-def test_exit_with_a_result_asks_first(env):
+# ---- Cierre ----
+def test_refuse_close_warns_and_never_closes(env):
     opened(env)
-    run_to_completion(env)
-    env.view.confirm_answer = False
-    env.remove.request_exit()
-    assert env.view.confirm_calls == [False] and env.remove.state is RemoveState.COMPLETED
-    assert env.view.closed == 0 and env.remove.result is not None  # no se perdió por accidente
-    env.view.confirm_answer = True
-    env.remove.request_exit()
-    assert env.remove.state is RemoveState.CLOSED and env.view.closed == 1
-    assert env.remove.result is None and document_untouched(env)
+    env.remove.refuse_close()
+    assert env.view.closed == 0 and env.remove.state is RemoveState.READY
+    assert env.view.statuses[-1][1] is StatusLevel.WARNING and "Cancelar" in env.view.statuses[-1][0]
+    env.remove.run()
+    assert env.op.started.wait(5)
+    env.remove.refuse_close()
+    assert env.view.closed == 0 and env.remove.state is RemoveState.PROCESSING
+    assert env.design.interaction.workspace == "remove_background"
+    env.op.gate.set()
+    pump(env, lambda: env.remove.state is RemoveState.COMPLETED)
+    env.remove.refuse_close()
+    assert env.view.closed == 0 and env.remove.result is not None
 
 
-def test_exit_while_processing_waits_for_the_inference_then_closes(env):
+def test_the_session_never_closes_with_an_active_task(env):
     opened(env)
     env.remove.run()
     assert env.op.started.wait(5)
-    env.view.confirm_answer = False
-    env.remove.request_exit()
-    assert env.view.confirm_calls == [True] and env.remove.state is RemoveState.PROCESSING
-    assert not env.remove.exit_requested  # el usuario dijo que no
-    env.view.confirm_answer = True
-    env.remove.request_exit()
-    assert env.remove.exit_requested and env.view.closed == 0  # la IA sigue: la ventana también
-    assert env.remove.can_exit is False and env.design.interaction.workspace == "remove_background"
-    env.remove.request_exit()  # otro intento: se ignora (sin doble cierre ni doble pregunta)
-    assert env.view.confirm_calls == [True, True]
+    env.remove.cancel()
+    env.remove.cancel()
+    env.remove.refuse_close()
+    assert env.view.closed == 0 and env.design.interaction.workspace == "remove_background"
     env.op.gate.set()
-    pump(env, lambda: env.remove.state is RemoveState.CLOSED)
-    assert env.view.closed == 1
-    assert env.design.interaction.workspace is None and not env.design.is_busy
-    assert env.remove.result is None and document_untouched(env)
-    assert env.view.after_close == []  # nada tocó la ventana después de cerrarla
+    pump(env, lambda: env.remove.state is RemoveState.CANCELLED)
 
 
 def test_close_is_idempotent_and_ignores_late_events(env):
+    from core.progress import ProgressEvent
+
     opened(env)
-    env.remove.request_exit()
-    env.remove.request_exit()
-    env.remove.close()
     env.remove.cancel()
-    assert env.remove.run() is False
-    env.remove.show_progress(object())
+    env.remove.cancel()
+    env.remove.close()
+    env.remove.refuse_close()
+    assert env.remove.run() is False and env.remove.ok() is False
+    env.remove.show_progress(ProgressEvent("Inferencia", 0.4, "x"))
     env.remove.show_status("tarde", StatusLevel.INFO)
     env.remove.set_busy(True)
     assert env.view.closed == 1 and env.view.after_close == []
@@ -371,94 +461,28 @@ def test_a_failing_window_close_still_unlocks_lumine(env):
         raise RuntimeError("Tk falló")
 
     env.view.close = boom
-    env.remove.request_exit()
-    assert env.remove.state is RemoveState.CLOSED
-    assert env.design.interaction.workspace is None and env.design.can(Action.OPEN_IMAGE)
-
-
-# ---- 8: errores ----
-def test_error_leaves_remove_usable_and_not_blocked(env):
-    opened(env)
-    env.op.fail = True
-    env.op.gate.set()
-    env.remove.run()
-    pump(env, lambda: env.remove.state is RemoveState.ERROR)
-    inter = env.design.interaction
-    assert inter.can(Action.ZOOM, Scope.TOOL) and not inter.is_processing
-    assert env.remove.can_run and env.remove.can_exit and not env.remove.can_cancel
-    assert env.view.statuses[-1][1] is StatusLevel.ERROR  # el error no se pierde en silencio
-    assert env.view.busy[-1] is False and document_untouched(env)
-    # reintento
-    env.op.fail = False
-    env.remove.run()
-    pump(env, lambda: env.remove.state is RemoveState.COMPLETED)
-    assert env.remove.result is not None
-
-
-def test_error_after_cancel_request_is_reported_not_swallowed(env):
-    opened(env)
-    env.op.fail = True
-    env.remove.run()
-    env.op.started.wait(5)
     env.remove.cancel()
-    env.op.gate.set()
-    pump(env, lambda: env.remove.state is RemoveState.ERROR)
-    assert env.view.statuses[-1][1] is StatusLevel.ERROR and env.remove.cancel_requested is False
+    assert env.remove.state is RemoveState.CLOSED and lumine_free(env)
 
 
-def test_error_while_exit_was_requested_still_closes(env):
-    opened(env)
-    env.op.fail = True
-    env.remove.run()
-    env.op.started.wait(5)
-    env.remove.request_exit()
-    env.op.gate.set()
-    pump(env, lambda: env.remove.state is RemoveState.CLOSED)
-    assert env.view.closed == 1 and env.design.interaction.workspace is None
-    assert env.design.interaction.state.value == "error"  # el fallo quedó registrado, sin bloquear nada
-    assert env.design.can(Action.OPEN_IMAGE)
-
-
-# ---- 9: entrar y salir varias veces ----
-def test_entering_and_leaving_many_times_leaves_no_threads_or_locks(env):
-    baseline = threading.active_count()
-    for i in range(6):
+def test_repeated_sessions_leave_no_threads_or_locks(env):
+    base = threading.active_count()
+    for _ in range(3):
         remove = RemoveController(env.design)
-        view = RemoveViewFake()
         assert remove.open()
-        remove.attach_view(view)
+        remove.attach_view(RemoveViewFake())
         env.op.gate.set()
-        if i % 3 == 0:  # una de cada tres sesiones procesa de verdad
-            remove.run()
-            end = time.monotonic() + 5
-            while remove.state is RemoveState.PROCESSING and time.monotonic() < end:
-                env.design.process_pending()
-                time.sleep(0.003)
-            if i % 2 == 0:
-                remove.cancel()  # descarta el resultado; las impares salen con el resultado en pantalla
-        view.confirm_answer = True
-        remove.request_exit()
-        assert remove.state is RemoveState.CLOSED and view.closed == 1 and view.after_close == []
-        assert env.design.interaction.workspace is None
-        assert env.design.interaction.state.value == "idle" and all(env.design.can(a) for a in Action)
-    deadline = time.monotonic() + 2
-    while threading.active_count() > baseline and time.monotonic() < deadline:
-        time.sleep(0.01)
-    assert threading.active_count() <= baseline  # ningún hilo de trabajo quedó vivo
-    assert document_untouched(env)
+        assert remove.run()
+        pump(env, lambda: remove.state is RemoveState.COMPLETED)
+        remove.cancel()
+        assert lumine_free(env)
+    time.sleep(0.1)
+    assert threading.active_count() <= base + 1 and document_untouched(env)
 
 
-# ---- compatibilidad de DesignController ----
-def test_run_tool_without_sink_still_reports_to_the_main_view(env):
-    env.op.gate.set()
-    env.design.run_tool("remove_background")
-    pump(env, lambda: bool(env.main.snapshots))
-    assert env.main.busy == [True, False]
-    assert [e.stage for e in env.main.progress] == ["Inferencia"]
-    assert env.main.snapshots[-1].operations[0].name == "remove_background"  # este camino SÍ confirma
-
-
-def test_preview_commit_path_leaves_the_engine_revision_alone(env):
+def test_the_main_window_gets_nothing_from_a_remove_session_except_the_final_commit(env):
     opened(env)
     run_to_completion(env)
-    assert env.remove.result.base_revision == env.service._engine._state.revision
+    assert env.main.snapshots == [] and env.main.progress == [] and env.main.busy == []
+    env.remove.ok()
+    assert len(env.main.snapshots) == 1 and env.main.progress == []

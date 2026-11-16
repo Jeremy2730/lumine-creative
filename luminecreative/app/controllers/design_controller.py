@@ -71,7 +71,7 @@ from app.interaction import Action, InteractionState
 from app.services.processing_service import ProcessingService
 from app.services.task_runner import BackgroundTaskRunner
 from core.exceptions import DesignToolError, NoImageLoadedError, ValidationError
-from core.models import ImageSnapshot
+from core.models import ImageSnapshot, PreviewResult
 from core.progress import ProgressEvent, ProgressReporter
 
 logger = logging.getLogger(__name__)
@@ -187,6 +187,20 @@ class DesignController:
 
     def remove_background(self) -> None:
         self.run_tool("remove_background")
+
+    def commit_preview(self, preview: PreviewResult, tool: str) -> ImageSnapshot | None:
+        """Confirma en el documento un resultado de ``run_preview`` y lo muestra en la vista principal.
+
+        Instantáneo (no usa hilos). ``None`` si se está procesando algo. Un resultado obsoleto
+        (el documento cambió desde que se calculó) lanza ``StalePreviewError`` sin confirmar nada.
+        """
+        if self._interaction.is_processing:
+            self._status("⏳ Espera a que termine el proceso actual.", StatusLevel.WARNING)
+            return None
+        snapshot = self._service.commit_preview(preview)
+        message = _TOOL_MESSAGES[tool].success
+        self._show(snapshot, f"{message} ({snapshot.size[0]} × {snapshot.size[1]} px)")
+        return snapshot
 
     def current_snapshot(self) -> ImageSnapshot | None:
         """Estado actual del documento (``None`` si no hay imagen). Solo lectura."""

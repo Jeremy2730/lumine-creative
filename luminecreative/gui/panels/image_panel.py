@@ -43,6 +43,13 @@ Notas de interacción (fase 1 del visor):
     - Escala de pantalla: ver ``gui/viewport_interaction.py``.
 
 Notas:
+    - Opciones de instancia (por omisión no cambian nada: el visor principal no las usa):
+      ``min_zoom`` fija un zoom mínimo ESTRICTO en la escala del indicador de porcentaje
+      (0,7 = «70 %»; «Ajustar» y el zoom no bajan de él, y si la imagen no cabe a ese zoom
+      se panea), ``fit_min_zoom`` hace que el mínimo sea siempre el zoom de ajuste (imagen
+      entera; se recalcula si cambia el área; excluyente con ``min_zoom``) y
+      ``transparency_checkerboard`` dibuja un tablero tras las zonas transparentes (solo
+      visual; ver ``ViewportRenderer``). Remove usa ``fit_min_zoom`` y el tablero.
     - ``show(image, keep_view=False)``: una imagen nueva se ajusta al área;
       con ``keep_view=True`` (resultado de una herramienta sobre el mismo
       documento) se conserva el modo y el encuadre del modelo. Quien llama
@@ -135,12 +142,29 @@ class ImagePanel(ctk.CTkFrame):
     _SLOW_RENDER_MS = 100.0
     _TIMING_HISTORY = 200
 
-    def __init__(self, master, *, pixel_ratio: Callable[[], float] | None = None) -> None:
+    def __init__(
+        self,
+        master,
+        *,
+        pixel_ratio: Callable[[], float] | None = None,
+        min_zoom: float | None = None,
+        fit_min_zoom: bool = False,
+        transparency_checkerboard: bool = False,
+    ) -> None:
+        if min_zoom is not None and not min_zoom > 0:
+            raise ValueError(f"min_zoom debe ser mayor que 0 (recibido {min_zoom!r}).")
+        if fit_min_zoom and min_zoom is not None:
+            raise ValueError("fit_min_zoom y min_zoom son excluyentes.")
         super().__init__(master, corner_radius=12, height=340)
         self.grid_propagate(False)  # el contenido no debe dictar el tamaño del panel
         self._pixel_ratio = pixel_ratio or physical_per_canvas_pixel
         self._model: ViewportModel | None = None
         self._renderer = ViewportRenderer()
+        self._renderer.set_checkerboard(transparency_checkerboard)
+        # ``min_zoom`` está en la escala del indicador de porcentaje (0,7 = «70 %», relativo a píxeles
+        # físicos). Con él el mínimo es estricto (ver ViewportModel): «Ajustar» no baja de él.
+        self._min_zoom = min_zoom
+        self._fit_min_zoom = fit_min_zoom  # el piso es el zoom de ajuste, recalculado con el visor
         self._shown: RenderedView | None = None
         self._photo: ImageTk.PhotoImage | None = None  # referencia: Tk no la retiene
         self._resize_job: str | None = None
@@ -169,6 +193,12 @@ class ImagePanel(ctk.CTkFrame):
         self._sync_chrome()
 
     # ------------------------------------------------------------ API pública
+    @property
+    def view_area(self) -> tk.Canvas:
+        """Widget del área donde se ve la imagen. Solo para ANCLAR capas de interfaz ajenas
+        (``place(in_=...)``); no es para dibujar: el renderizado sigue siendo cosa del panel."""
+        return self._canvas
+
     @property
     def viewport(self) -> ViewportModel | None:
         """Modelo geométrico de la vista (``None`` mientras no haya imagen)."""
@@ -199,12 +229,29 @@ class ImagePanel(ctk.CTkFrame):
         width, height = image.size
         viewport = self._viewport_size()
         if self._model is None:
-            self._model = ViewportModel((width, height), viewport)
+            self._model = ViewportModel((width, height), viewport, **self._model_options())
         else:
             self._model.set_viewport_size(*viewport)
             self._model.set_image_size(width, height, keep_view=keep_view)
         self._renderer.set_image(image)
         self._render()
+
+    def _model_options(self) -> dict[str, object]:
+        """Opciones del modelo. El modelo trabaja en píxeles de canvas y el indicador, en físicos:
+        el mínimo se convierte con el mismo factor para que el límite coincida con lo que se lee."""
+        if self._fit_min_zoom:
+            return {"fit_min_zoom": True}  # sin valor fijo: el piso sale del modelo
+        if self._min_zoom is None:
+            return {}
+        return {"min_zoom": self._min_zoom / self._pixel_ratio(), "strict_min_zoom": True}
+
+    def set_transparency_checkerboard(self, enabled: bool) -> None:
+        """Activa o desactiva el tablero tras las zonas transparentes (solo visual; ver renderizador)."""
+        if self._destroyed:
+            return
+        self._renderer.set_checkerboard(enabled)
+        if self._model is not None:
+            self.redraw()
 
     def redraw(self) -> None:
         """Vuelve a pintar ahora el estado actual del modelo."""

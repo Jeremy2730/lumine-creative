@@ -24,8 +24,8 @@ Notas:
       mostrarlo es una sola llamada a ``grid()``.
     - "Quitar fondo" ya no procesa: abre el espacio de trabajo de Remove (su
       ventana y su visor propios; ver tools/remove). Mientras está abierto,
-      ``InteractionState`` bloquea esta ventana y la X (``_on_close``) cierra
-      primero Remove.
+      ``InteractionState`` bloquea esta ventana y la X (``_on_close``) no la
+      cierra: Remove termina con OK o Cancelar.
     - Cada ``show_snapshot`` indica al visor si la imagen continúa el mismo
       documento (``_continues_document``: mismo origen y una operación más
       que antes) para conservar zoom y encuadre, o si es una imagen nueva
@@ -97,6 +97,7 @@ class MainWindow(ctk.CTk):
         self._closed = False
         self._size_resolution = SizeResolutionController(controller)
         self._remove: RemoveController | None = None  # sesión de Remove abierta (si la hay)
+        self._remove_dialog: RemoveDialog | None = None
         self._settings = settings
         self._snapshot: ImageSnapshot | None = None
 
@@ -211,7 +212,10 @@ class MainWindow(ctk.CTk):
     def _on_close(self) -> None:
         """Cerrar con la X y "Salir" convergen aquí (respeta cambios pendientes)."""
         if self._remove is not None and self._remove.state is not RemoveState.CLOSED:
-            self._remove.request_exit()  # con Remove abierto, la X cierra primero Remove
+            # Con Remove abierto no se cierra Lumine: Remove termina con OK o Cancelar.
+            self._remove.refuse_close()
+            if self._remove_dialog is not None:
+                self._remove_dialog.lift()
             return
         if self._file_controller is not None:
             self._file_controller.request_exit()
@@ -224,11 +228,11 @@ class MainWindow(ctk.CTk):
         if not session.open():
             return
         try:
-            RemoveDialog(self, session)
+            dialog = RemoveDialog(self, session)
         except Exception:
             session.close()  # si la ventana no se pudo construir, Lumine no puede quedar bloqueado
             raise
-        self._remove = session
+        self._remove, self._remove_dialog = session, dialog
 
     def _on_size_resolution(self) -> None:
         if self._snapshot is None:
