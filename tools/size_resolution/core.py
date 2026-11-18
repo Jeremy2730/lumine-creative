@@ -90,6 +90,10 @@ class SizeResolutionAdjuster(ImageOperation):
     """Fija tamaño físico y resolución. ``resample`` decide si cambian los píxeles."""
 
     name = "size_resolution"
+    # Excepción declarada al contrato de conservación: esta herramienta SÍ cambia, a propósito,
+    # el tamaño en píxeles (con remuestreo) y la resolución.
+    changes_geometry = True
+    changes_resolution = True
 
     def __init__(
         self,

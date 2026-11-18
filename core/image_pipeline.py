@@ -4,27 +4,53 @@ Responsabilidad:
     - Encadenar una lista ordenada de ImageOperation y ejecutarlas sobre
       una imagen. Es atómico: si un paso falla, no se devuelve un
       resultado parcial.
+    - Hacer cumplir el contrato de conservación (core/operation.py,
+      core/image_metadata.py) tras CADA operación: mismo tamaño en píxeles salvo
+      que lo declare, y PPI/perfil ICC de la entrada salvo que fije la resolución.
+      Todas las herramientas pasan por aquí, así que la política es única.
 
 No conoce:
     - Qué hace cada operación concreta ni de dónde viene la imagen.
 """
 from __future__ import annotations
 
+import logging
 from collections.abc import Callable, Iterable, Iterator
 from dataclasses import dataclass
 
 from PIL import Image
 
 from core.exceptions import DesignToolError, ProcessingError
+from core.image_metadata import PRESERVED_INFO_KEYS, restore_metadata
 from core.models import AppliedOperation
 from core.operation import ImageOperation
 from core.progress import ProgressReporter
+
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
 class PipelineResult:
     image: Image.Image
     applied: tuple[AppliedOperation, ...]
+
+
+def _enforce_preservation(operation: ImageOperation, before: Image.Image, after: Image.Image) -> Image.Image:
+    """Contrato de conservación (ver ``ImageOperation``): tamaño en píxeles, PPI y perfil de color."""
+    if not operation.changes_geometry and after.size != before.size:
+        raise ProcessingError(
+            detail=(
+                f"La operación '{operation.name}' cambió el tamaño ({before.size} → {after.size}) "
+                "sin declarar changes_geometry."
+            )
+        )
+    if not operation.changes_resolution:
+        lost = [k for k in PRESERVED_INFO_KEYS if after is not before and before.info.get(k) != after.info.get(k)]
+        if lost:  # diagnóstico: la herramienta no traspasó sus metadatos; se restituyen
+            logger.info("La operación '%s' no conservó %s; se restituye desde la entrada.", operation.name, ", ".join(lost))
+        restore_metadata(before, after)
+    return after
 
 
 class ImagePipeline:
@@ -56,9 +82,10 @@ class ImagePipeline:
                 on_step(operation)
             try:
                 if progress is not None:
-                    image = operation.apply_with_progress(image, progress)
+                    result = operation.apply_with_progress(image, progress)
                 else:
-                    image = operation.apply(image)
+                    result = operation.apply(image)
+                image = _enforce_preservation(operation, image, result)
             except DesignToolError:
                 raise
             except Exception as exc:  # error técnico inesperado de una herramienta

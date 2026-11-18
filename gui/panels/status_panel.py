@@ -1,7 +1,9 @@
 """gui/panels/status_panel.py
 
 Responsabilidad:
-    - Mostrar el mensaje de estado (con color según nivel) y una barra de
+    - Mostrar el mensaje de estado SOLO si es un aviso o un error (con color según nivel;
+      los comentarios rutinarios —listo, abriendo, completado, guardado— no se muestran y
+      borran el aviso anterior) y una barra de
       progreso mientras hay trabajo en curso: indeterminada si la
       operación no informa su avance, y DETERMINADA (porcentaje, nombre de
       etapa y mensaje) cuando recibe eventos de progreso.
@@ -24,7 +26,7 @@ from __future__ import annotations
 
 import customtkinter as ctk
 
-from app.controllers.design_controller import StatusLevel
+from app.controllers.design_controller import StatusLevel, user_visible_status
 from core.progress import ProgressEvent
 
 _COLORS: dict[StatusLevel, tuple[str, str]] = {
@@ -43,7 +45,7 @@ class StatusPanel(ctk.CTkFrame):
         super().__init__(master, corner_radius=12)
         self.columnconfigure(0, weight=1)
 
-        self._label = ctk.CTkLabel(self, text="Estado: Listo", anchor="w", justify="left")
+        self._label = ctk.CTkLabel(self, text="", anchor="w", justify="left")
         self._label.grid(row=0, column=0, padx=16, pady=(12, 4), sticky="ew")
         self.bind("<Configure>", lambda e: self._label.configure(wraplength=max(e.width - 32, 100)))
 
@@ -67,7 +69,8 @@ class StatusPanel(ctk.CTkFrame):
     def set_message(self, message: str, level: StatusLevel = StatusLevel.INFO) -> None:
         if self._destroyed:
             return
-        self._label.configure(text=f"Estado: {message}", text_color=_COLORS[level])
+        text = user_visible_status(message, level)
+        self._label.configure(text=f"Estado: {text}" if text else "", text_color=_COLORS[level])
 
     def set_busy(self, busy: bool) -> None:
         if self._destroyed:

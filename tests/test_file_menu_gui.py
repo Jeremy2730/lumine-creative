@@ -24,12 +24,16 @@ from PIL import Image
 
 import gui.main_window as main_window
 from app.application import build_controllers
+from app.interaction import Action
 from app.services.file_service import SaveSuggestion
 from config.settings import Settings
 from gui.components import dialogs
 from gui.main_window import MainWindow
 from gui.panels.status_panel import StatusPanel
 from gui.panels.tools_panel import ToolsPanel
+from tests.test_remove_controller import lumine_free
+from tools.remove import RemoveController, RemoveState
+from tools.remove.dialog import RemoveDialog
 
 TITLE = "Herramienta para Diseño"
 
@@ -193,26 +197,63 @@ def layout(ui):
 
 
 def test_no_tool_buttons_remain_in_the_main_window_but_the_pipeline_history_does(ui):
-    assert [w for w in widgets_of(ui.win) if isinstance(w, ctk.CTkButton)] == []
+    # Los únicos botones permitidos son los 4 controles de zoom del visor (ImagePanel._buttons).
+    # Se excluyen ESOS widgets concretos, no «los botones del visor» en general: cualquier otro
+    # CTkButton (p. ej. un botón de herramienta) sigue haciendo fallar la prueba.
+    zoom_controls = list(ui.win._image_panel._buttons)
+    assert [b.cget("text") for b in zoom_controls] == ["−", "+", "Ajustar", "100 %"]
+    buttons = [w for w in widgets_of(ui.win) if isinstance(w, ctk.CTkButton)]
+    assert all(any(b is z for b in buttons) for z in zoom_controls)  # los controles de zoom siguen ahí
+    assert [b.cget("text") for b in buttons if not any(b is z for z in zoom_controls)] == []
     texts = [w.cget("text") for w in widgets_of(ui.win._tools_panel) if isinstance(w, ctk.CTkLabel)]
     assert "Pipeline / procesos aplicados" in texts and "Herramientas" not in texts
 
 
-def test_tools_menu_runs_each_tool_exactly_as_before(ui, monkeypatch):
-    from tools.background_remover import BackgroundRemover
+def test_tools_menu_opens_and_runs_each_tool_with_expected_behavior(ui):
+    """Quitar fondo ya no procesa: abre Remove (READY) y bloquea las demás herramientas hasta que se
+    cancela. Después, Semitono, Nitidez y Tamaño y resolución funcionan igual que antes."""
     from tools.size_resolution.dialog import SizeResolutionDialog
 
-    monkeypatch.setattr(BackgroundRemover, "_load_rembg", staticmethod(lambda: (lambda data: data)))
     open_doc(ui)
     tools = ui.win._menu.tools_menu
-    for index in (0, 1, 3):  # Quitar fondo, Semitono, Dar nitidez
+    entries = range(4)
+    operations = lambda: ui.design._service.snapshot().operations  # noqa: E731
+    assert all(state(tools, i) == "normal" for i in entries) and not operations()
+
+    # 1. «Quitar fondo» abre Remove, en READY y sin procesar nada.
+    tools.invoke(0)
+    ui.win.update()
+    remove, dialog = ui.win._remove, ui.win._remove_dialog
+    assert isinstance(remove, RemoveController) and remove.state is RemoveState.READY
+    assert isinstance(dialog, RemoveDialog) and dialog._alive and dialog.master is ui.win
+    assert not operations() and not ui.design.is_busy
+
+    # 2. Mientras está abierto, las demás herramientas quedan bloqueadas (menú y acciones).
+    pump(ui, 0.1)
+    assert all(state(tools, i) == "disabled" for i in entries)
+    assert ui.design.interaction.workspace == "remove_background" and not ui.design.can(Action.OPEN_TOOL)
+    for index in (1, 3):  # invocar una entrada desactivada no hace nada
+        tools.invoke(index)
+    settle(ui)
+    assert not operations()
+
+    # 3. Al cancelar Remove, Lumine recupera el control.
+    remove.cancel()
+    pump(ui, 0.1)
+    assert remove.state is RemoveState.CLOSED and not dialog._alive
+    assert lumine_free(ui) and all(state(tools, i) == "normal" for i in entries)
+    assert not operations()  # cancelar no deja ninguna operación
+
+    # 4. Semitono y Nitidez se ejecutan con normalidad y el historial las registra.
+    for index in (1, 3):  # Semitono, Dar nitidez
         tools.invoke(index)
         settle(ui)
-    labels = [op.label for op in ui.design._service.snapshot().operations]
-    assert labels == ["Fondo", "Semitono", "Nitidez"]
+    assert [op.label for op in operations()] == ["Semitono", "Nitidez"]
     chips = [w.cget("text").strip() for w in widgets_of(ui.win._tools_panel._chips) if isinstance(w, ctk.CTkLabel)]
-    assert [c for c in chips if c != "→"] == ["Fondo", "Semitono", "Nitidez"]  # el historial se conserva
-    tools.invoke(2)  # Tamaño y resolución… abre su diálogo
+    assert [c for c in chips if c != "→"] == ["Semitono", "Nitidez"]  # el historial se conserva
+
+    # 5. Tamaño y resolución… sigue abriendo su diálogo.
+    tools.invoke(2)
     ui.win.update()
     opened = [w for w in ui.win.winfo_children() if isinstance(w, SizeResolutionDialog)]
     assert len(opened) == 1

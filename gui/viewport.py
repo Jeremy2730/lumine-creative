@@ -50,8 +50,15 @@ Notas (decisiones geométricas):
       comportamiento de arriba no cambia): ``min_zoom`` NUNCA baja del límite
       configurado. Si la imagen no cabe a ese zoom, "ajustar" se queda en el
       mínimo (``fit_zoom`` = el mínimo) y la imagen se paneará; en modo
-      ajustar se coloca centrada en los ejes que no caben. Lo usa Remove
-      (70 %); el visor principal no lo activa.
+      ajustar se coloca centrada en los ejes que no caben. Ya no lo usa
+      Remove (ahora usa ``fit_min_zoom``); el visor principal no lo activa.
+    - Piso = zoom de ajuste (``fit_min_zoom=True``, opt-in; lo usa Remove): el
+      mínimo es SIEMPRE el zoom que muestra la imagen entera en el viewport
+      actual (``min(vw/iw, vh/ih)``), sin valor fijo. Se recalcula solo al
+      cambiar el viewport o la imagen: si el viewport crece, un zoom manual
+      por debajo del nuevo piso sube a él. Si el zoom llega al piso, se
+      vuelve al modo ajustar (así un viewport que luego se reduce reajusta
+      en vez de recortar). El piso se limita por arriba a ``max_zoom``.
     - Cambio de tamaño del viewport: en modo ajustar se reajusta; en zoom
       manual se conserva el punto de la imagen que estaba en el centro del
       viewport. Cambiar el viewport nunca altera ``image_size``.
@@ -162,7 +169,10 @@ class ViewportModel:
         min_zoom: float = DEFAULT_MIN_ZOOM,
         max_zoom: float = DEFAULT_MAX_ZOOM,
         strict_min_zoom: bool = False,
+        fit_min_zoom: bool = False,
     ) -> None:
+        if fit_min_zoom and strict_min_zoom:
+            raise ValueError("fit_min_zoom y strict_min_zoom son excluyentes.")
         low = _positive(min_zoom, "min_zoom")
         high = _positive(max_zoom, "max_zoom")
         if low > high:
@@ -171,6 +181,7 @@ class ViewportModel:
         viewport = _size(viewport_size, "viewport_size", allow_zero=True)
         self._min_limit = low
         self._strict_min = bool(strict_min_zoom)
+        self._fit_min = bool(fit_min_zoom)
         self._max_zoom = high
         self._image = image
         self._viewport = viewport
@@ -211,6 +222,8 @@ class ViewportModel:
     @property
     def min_zoom(self) -> float:
         """Mínimo efectivo: baja del configurado si hace falta para poder ajustar (salvo ``strict_min_zoom``)."""
+        if self._fit_min:
+            return max(_ZOOM_FLOOR, min(self._raw_fit_zoom, self._max_zoom))
         if self._strict_min:
             return max(_ZOOM_FLOOR, self._min_limit)
         return max(_ZOOM_FLOOR, min(self._min_limit, self._raw_fit_zoom))
@@ -439,3 +452,5 @@ class ViewportModel:
         self._fit_mode = False
         self._zoom = target
         self._place(image_point, anchor)
+        if self._fit_min and math.isclose(target, self.min_zoom, rel_tol=1e-12, abs_tol=0.0):
+            self.fit()  # en el piso = ajustado: vuelve al modo ajustar (queda centrada)

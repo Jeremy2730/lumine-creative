@@ -28,6 +28,8 @@ Notas:
       despachar. Lo mismo ocurrió con "Redimensionar", que se eliminó
       por completo: su responsabilidad ya la cubre "Tamaño y
       resolución".
+    - Mensajes: el controlador emite todos los niveles por ``show_status``; ``user_visible_status``
+      define cuáles se muestran (solo WARNING y ERROR; INFO/SUCCESS son rutina y se callan).
     - ``run_task`` es la ÚNICA compuerta de exclusión de tareas de la
       aplicación (un solo ``InteractionState`` y un solo runner). Las
       herramientas (``run_tool``) y los flujos de archivo
@@ -82,6 +84,18 @@ class StatusLevel(str, Enum):
     SUCCESS = "success"
     WARNING = "warning"
     ERROR = "error"
+
+
+# Criterio de comunicación visual (el mismo que usa Remove): los niveles INFO y SUCCESS son
+# comentarios rutinarios (abriendo, listo, completado, guardado...) y NO se muestran; solo
+# llegan al usuario las advertencias y los errores. Los controladores siguen emitiendo todos
+# los niveles (los tests y cualquier otra vista los reciben); filtrar es cosa de la vista.
+NOTEWORTHY_LEVELS = (StatusLevel.WARNING, StatusLevel.ERROR)
+
+
+def user_visible_status(message: str, level: StatusLevel) -> str:
+    """Texto que debe ver el usuario: el mensaje si es aviso o error; ``""`` si es rutinario."""
+    return message if level in NOTEWORTHY_LEVELS else ""
 
 
 class DesignView(Protocol):

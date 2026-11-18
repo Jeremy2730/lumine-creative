@@ -1,9 +1,45 @@
+# Python
 __pycache__/
-*.pyc
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Entornos virtuales
 .venv/
 venv/
-.pytest_cache/
-logs/
-*.egg-info/
+env/
+
+# IDE y sistema
 .idea/
 .vscode/
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Logs y temporales
+logs/
+*.log
+*.tmp
+*.temp
+*~
+
+# Modelos de IA
+.u2net/
+*.onnx
+*.pth
+*.pt
+
+# Respaldos y archivos comprimidos
+luminecreative/
+lumine creative/
+respaldo*/
+backup*/
+*.bak
+*.orig
+*.rej
+
+# Archivos de distribución
+dist/
+build/

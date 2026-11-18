@@ -20,23 +20,23 @@ Notas:
       mostrarla. El resultado de RMBG se calcula con ``preview`` (sin confirmar) y
       vive aquí como ``PreviewResult`` hasta que se pulsa OK o se descarta.
     - Botones: «Quitar fondo» (``run``), «Cancelar» (``cancel``) y «OK» (``ok``).
-      No hay «Salir» ni cierre con la X: la ventana solo se cierra con OK o con
-      Cancelar (``refuse_close`` atiende los intentos de cerrarla de otra forma).
+      No hay «Salir». La X de la ventana de Remove la gobierna ``request_close``: sin
+      cambios pendientes equivale a Cancelar; con un resultado sin confirmar pide
+      antes una confirmación (``has_pending_changes``). ``refuse_close`` atiende solo
+      el intento de cerrar LUMINE (su ventana principal) mientras Remove está abierto.
+    - Con RMBG trabajando, Cancelar y la X NO hacen nada salvo ``RemoveView.alert()`` (el
+      sonido de advertencia del sistema): ni cancelan, ni cierran, ni cambian el estado, ni
+      escriben ningún mensaje. La inferencia de ONNX no se puede interrumpir y la sesión
+      sigue hasta que termina (COMPLETED o ERROR).
     - OK solo existe con un resultado terminado (COMPLETED): usa
       ``DesignController.commit_preview`` (motor: ``commit``; rechaza un resultado
       obsoleto), el documento principal se actualiza por el mecanismo de siempre y
       la sesión se cierra. Si confirmar falla, la sesión NO se cierra: queda en ERROR
       con el documento intacto.
-    - Cancelar:
-        * sin tarea en curso: descarta el resultado (si lo hay) y cierra la
-          sesión; el documento principal no cambia;
-        * con RMBG trabajando: la inferencia de ONNX no se puede interrumpir, así
-          que solo se PIDE descartar el resultado (no se dice "cancelado" mientras
-          sigue ejecutándose); al terminar se descarta y la sesión queda abierta en
-          CANCELLED mostrando el original (se puede reintentar o pulsar Cancelar
-          otra vez para volver a Lumine). Nunca se cierra con una tarea activa.
-    - Estados: READY → PROCESSING → COMPLETED | CANCELLED | ERROR; desde
-      CANCELLED y ERROR se puede volver a procesar; CLOSED es final. Los
+    - Cancelar (sin tarea en curso): descarta el resultado (si lo hay) y cierra la
+      sesión; el documento principal no cambia. Con RMBG trabajando no hace nada (ver arriba).
+    - Estados: READY → PROCESSING → COMPLETED | ERROR; desde
+      ERROR se puede volver a procesar; CLOSED es final. Los
       permisos del visor los da ``InteractionState`` (ámbito TOOL); los de los
       botones, este estado (``can_run``/``can_ok``/``can_cancel``).
     - Mensajes de estado: los de la tarea llegan como eventos de progreso y aquí
@@ -51,7 +51,7 @@ from __future__ import annotations
 
 import logging
 from enum import Enum
-from typing import Any, Protocol
+from typing import Any, Callable, Protocol
 
 from PIL import Image
 
@@ -72,7 +72,6 @@ class RemoveState(str, Enum):
     READY = "ready"
     PROCESSING = "processing"
     COMPLETED = "completed"
-    CANCELLED = "cancelled"
     ERROR = "error"
     CLOSED = "closed"
 
@@ -89,17 +88,16 @@ class RemoveView(Protocol):
     def state_changed(self) -> None:
         """El estado o los permisos cambiaron: la ventana vuelve a leerlos."""
 
+    def alert(self) -> None:
+        """Aviso sonoro del sistema (sin diálogo ni texto): se pidió algo que ahora no se puede hacer."""
+
     def close(self) -> None:
         """Destruye la ventana (se llama una sola vez)."""
 
 
 _MSG_READY = "Remove listo. Pulsa «Quitar fondo» para procesar la imagen."
 _MSG_DONE = "Procesamiento completado. Pulsa OK para aplicar el resultado o Cancelar para descartarlo."
-_MSG_DISCARDED = "Resultado descartado."
 _MSG_ERROR = "Error durante el procesamiento. Puedes volver a intentarlo o pulsar Cancelar."
-_MSG_CANCELLING = (
-    "Cancelando: la IA no se puede interrumpir; el resultado se descartará cuando termine."
-)
 _MSG_CLOSE_REFUSED = "Usa «Cancelar» para descartar o «OK» para aplicar el resultado."
 _MSG_COMMIT_ERROR = "No se pudo aplicar el resultado."
 
@@ -115,7 +113,6 @@ class RemoveController:
         self._original: Image.Image | None = None
         self._result: PreviewResult | None = None
         self._opened = False
-        self._cancel_requested = False
         self._last_progress_text: str | None = None
 
     # ---- consulta ----
@@ -129,14 +126,9 @@ class RemoveController:
         return self._result
 
     @property
-    def cancel_requested(self) -> bool:
-        return self._cancel_requested
-
-    @property
     def can_run(self) -> bool:
         return self._opened and self._state in (
             RemoveState.READY,
-            RemoveState.CANCELLED,
             RemoveState.ERROR,
         )
 
@@ -146,12 +138,21 @@ class RemoveController:
         return self._opened and self._state is RemoveState.COMPLETED and self._result is not None
 
     @property
+    def has_pending_changes(self) -> bool:
+        """Hay un resultado de ESTA sesión sin confirmar ni descartar.
+
+        Es el mismo criterio que habilita «OK» (``can_ok``): no se mantiene ninguna
+        bandera paralela. Un resultado ya confirmado con OK cierra la sesión y vive en
+        el documento, no aquí; abrir Remove de nuevo es otra sesión, sin resultado.
+        Procesar en curso, un error o un resultado ya descartado no cuentan.
+        """
+        return self.can_ok
+
+    @property
     def can_cancel(self) -> bool:
         if not self._opened or self._state is RemoveState.CLOSED:
             return False
-        if self._state is RemoveState.PROCESSING:
-            return not self._cancel_requested  # ya pedida: no se repite
-        return True
+        return True  # también procesando: el botón sigue activo y pulsarlo solo avisa con un sonido
 
     @property
     def interaction(self) -> InteractionState:
@@ -222,19 +223,37 @@ class RemoveController:
         return True
 
     def cancel(self) -> None:
-        """«Cancelar»: descarta (ya, o al terminar la IA) y, sin tarea en curso, vuelve a Lumine."""
+        """«Cancelar»: descarta y vuelve a Lumine. Con RMBG trabajando solo suena el aviso del sistema."""
         if not self.can_cancel:
             return
         if self._state is RemoveState.PROCESSING:
-            self._cancel_requested = True
-            self._status(_MSG_CANCELLING, StatusLevel.WARNING)
-            self._changed()
+            self._alert()
             return
         self._result = None
         self._close()
 
+    def request_close(self, confirm_discard: Callable[[], bool]) -> bool:
+        """La X de la ventana de Remove. ``False`` solo si el usuario decide «Seguir editando».
+
+        Sin cambios pendientes cierra directamente, como Cancelar y sin preguntar. Con un
+        resultado sin confirmar llama a ``confirm_discard`` (la ventana muestra el diálogo y
+        devuelve ``True`` para «Descartar cambios y cerrar»). Descartar es exactamente
+        ``cancel()``: no toca el documento, así que lo ya confirmado con OK nunca se pierde.
+        Con RMBG trabajando no se cierra (``False``) y solo suena el aviso del sistema: ni
+        pregunta ni escribe nada, y el procesamiento sigue.
+        """
+        if self._state is RemoveState.CLOSED:
+            return True
+        if self._state is RemoveState.PROCESSING:
+            self._alert()
+            return False
+        if self.has_pending_changes and not confirm_discard():
+            return False
+        self.cancel()  # el estado pudo cambiar mientras se preguntaba: cancel() lo comprueba
+        return True
+
     def refuse_close(self) -> None:
-        """Intento de cerrar la ventana sin OK ni Cancelar (X, Alt+F4, X de la ventana principal)."""
+        """Intento de cerrar LUMINE (X de la ventana principal) con Remove abierto: no se cierra."""
         if self._state is not RemoveState.CLOSED:
             self._status(_MSG_CLOSE_REFUSED, StatusLevel.WARNING)
 
@@ -261,9 +280,6 @@ class RemoveController:
     def _on_result(self, preview: Any) -> None:
         if self._state is RemoveState.CLOSED:
             return
-        if self._cancel_requested:
-            self._discard(_MSG_DISCARDED)
-            return
         self._result = preview
         self._set(RemoveState.COMPLETED)
         if self._view is not None:
@@ -274,7 +290,6 @@ class RemoveController:
         # DesignController ya registró el error (log); aquí solo se refleja en la sesión.
         if self._state is RemoveState.CLOSED:
             return
-        self._cancel_requested = False
         self._set(RemoveState.ERROR)
         self._status(_MSG_ERROR, StatusLevel.ERROR)
 
@@ -287,13 +302,9 @@ class RemoveController:
             self._view.show_image(self._original, keep_view=True)
         self._status(message, StatusLevel.ERROR)
 
-    def _discard(self, message: str) -> None:
-        self._result = None
-        self._cancel_requested = False
-        self._set(RemoveState.CANCELLED)
-        if self._view is not None and self._original is not None:
-            self._view.show_image(self._original, keep_view=True)
-        self._status(message, StatusLevel.INFO)
+    def _alert(self) -> None:
+        if self._view is not None:
+            self._view.alert()
 
     def _close(self) -> None:
         if self._state is RemoveState.CLOSED:

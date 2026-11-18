@@ -106,11 +106,15 @@ def centre(panel):
 
 # ------------------------------------------------------------------ enlaces
 def test_events_are_bound_on_the_canvas(env):
-    bound = set(env.panel._canvas.bind())
+    # Se consulta cada secuencia por separado: ``canvas.bind(secuencia)`` devuelve el script enlazado
+    # (vacío si no hay nada). No se compara con ``canvas.bind()`` sin argumentos, cuyo texto Tk
+    # normaliza (``<ButtonPress-2>`` → ``<Button-2>``, ``<KeyPress-space>`` → ``<Key-space>``).
+    canvas = env.panel._canvas
     for sequence in ("<MouseWheel>", "<Button-4>", "<Button-5>", "<ButtonPress-2>", "<B2-Motion>",
                      "<ButtonRelease-2>", "<ButtonPress-1>", "<B1-Motion>", "<ButtonRelease-1>",
                      "<KeyPress-space>", "<KeyRelease-space>", "<Configure>"):
-        assert sequence in bound, sequence
+        assert canvas.bind(sequence), f"{sequence} no está enlazado en el canvas"
+    assert canvas.bind("<<LumineSinEnlazar>>") == ""  # control: una secuencia sin enlazar sí da vacío
 
 
 def test_controls_are_disabled_and_scrollbars_hidden_without_an_image(env):

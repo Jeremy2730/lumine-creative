@@ -84,6 +84,7 @@ class RemoveViewFake:
         self.images, self.statuses, self.busy = [], [], []
         self.state_changes = 0
         self.closed = 0
+        self.alerts = 0
         self.after_close = []  # cualquier llamada posterior al cierre (no debe haber)
 
     def _guard(self, what):
@@ -105,6 +106,10 @@ class RemoveViewFake:
     def state_changed(self):
         self._guard("state_changed")
         self.state_changes += 1
+
+    def alert(self):
+        self._guard("alert")
+        self.alerts += 1
 
     def close(self):
         self.closed += 1
@@ -365,40 +370,37 @@ def test_cancel_with_a_result_discards_and_closes(env):
     assert lumine_free(env) and env.view.closed == 1
 
 
-def test_cancel_while_processing_waits_for_the_ai_then_discards(env):
+def test_cancel_while_processing_only_alerts_and_the_ai_keeps_working(env):
+    opened(env)
+    env.remove.run()
+    assert env.op.started.wait(5)
+    snapshot = (list(env.view.statuses), list(env.view.images), env.view.state_changes, list(env.view.busy))
+    env.remove.cancel()
+    assert env.view.alerts == 1
+    # nada más: ni estado, ni mensajes, ni imagen, ni repintado de botones, ni cierre
+    assert env.remove.state is RemoveState.PROCESSING and env.view.closed == 0
+    assert (list(env.view.statuses), list(env.view.images), env.view.state_changes, list(env.view.busy)) == snapshot
+    assert env.remove.can_cancel and env.remove.ok() is False
+    assert env.design.interaction.workspace == "remove_background"
+    assert document_untouched(env) and env.main.statuses == [] and env.main.snapshots == []
+
+
+def test_processing_continues_and_completes_after_cancel_attempts(env):
     opened(env)
     env.remove.run()
     assert env.op.started.wait(5)
     env.remove.cancel()
-    assert env.remove.state is RemoveState.PROCESSING and env.remove.cancel_requested
-    assert env.view.closed == 0 and env.remove.can_cancel is False
-    assert "no se puede interrumpir" in env.view.statuses[-1][0]
-    assert env.remove.ok() is False
-    env.op.gate.set()
-    pump(env, lambda: env.remove.state is RemoveState.CANCELLED)
-    assert env.remove.result is None and env.view.closed == 0
-    assert env.view.images[-1] == (env.doc.image, True)
-    assert env.view.statuses[-1][0] == "Resultado descartado."
-    assert document_untouched(env) and env.main.snapshots == []
-    assert env.design.interaction.can(Action.ZOOM, Scope.TOOL)
-    assert env.remove.can_run and env.remove.can_cancel
-    env.remove.cancel()  # segundo Cancelar: ahora sí vuelve a Lumine
-    assert env.remove.state is RemoveState.CLOSED and lumine_free(env) and document_untouched(env)
-
-
-def test_a_cancelled_run_can_be_repeated_and_applied(env):
-    opened(env)
-    env.remove.run()
-    env.op.started.wait(5)
     env.remove.cancel()
+    assert env.view.alerts == 2 and env.op.calls == 1
     env.op.gate.set()
-    pump(env, lambda: env.remove.state is RemoveState.CANCELLED)
-    assert env.remove.run()
     pump(env, lambda: env.remove.state is RemoveState.COMPLETED)
-    assert env.op.calls == 2 and env.remove.ok() and revision(env) == 2
+    assert env.remove.result is not None and env.remove.can_ok and env.view.closed == 0
+    assert env.view.images[-1][0] is env.remove.result.image
+    assert env.view.alerts == 2  # al terminar no suena nada más
+    assert env.remove.ok() is True and revision(env) == 2 and env.view.after_close == []
 
 
-def test_error_after_cancel_request_is_reported_and_leaves_remove_usable(env):
+def test_a_failed_run_after_cancel_attempts_is_a_normal_error_and_stays_usable(env):
     opened(env)
     env.op.fail = True
     env.remove.run()
@@ -406,8 +408,17 @@ def test_error_after_cancel_request_is_reported_and_leaves_remove_usable(env):
     env.remove.cancel()
     env.op.gate.set()
     pump(env, lambda: env.remove.state is RemoveState.ERROR)
-    assert not env.remove.cancel_requested and env.view.statuses[-1][1] is StatusLevel.ERROR
+    assert env.view.statuses[-1][1] is StatusLevel.ERROR and env.view.closed == 0
     assert env.remove.can_run and env.remove.can_cancel and document_untouched(env)
+    env.remove.cancel()  # ya sin tarea: Cancelar vuelve a funcionar y cierra
+    assert env.remove.state is RemoveState.CLOSED and lumine_free(env) and env.view.alerts == 1
+
+
+def test_cancel_only_alerts_while_processing_and_works_normally_otherwise(env):
+    opened(env)
+    run_to_completion(env)
+    env.remove.cancel()
+    assert env.view.alerts == 0 and env.remove.state is RemoveState.CLOSED
 
 
 # ---- Cierre ----
@@ -432,11 +443,11 @@ def test_the_session_never_closes_with_an_active_task(env):
     env.remove.run()
     assert env.op.started.wait(5)
     env.remove.cancel()
-    env.remove.cancel()
+    assert env.remove.request_close(never_asked) is False
     env.remove.refuse_close()
     assert env.view.closed == 0 and env.design.interaction.workspace == "remove_background"
     env.op.gate.set()
-    pump(env, lambda: env.remove.state is RemoveState.CANCELLED)
+    pump(env, lambda: env.remove.state is RemoveState.COMPLETED)
 
 
 def test_close_is_idempotent_and_ignores_late_events(env):
@@ -486,3 +497,133 @@ def test_the_main_window_gets_nothing_from_a_remove_session_except_the_final_com
     assert env.main.snapshots == [] and env.main.progress == [] and env.main.busy == []
     env.remove.ok()
     assert len(env.main.snapshots) == 1 and env.main.progress == []
+
+
+# ---- La X de Remove: advertencia solo con cambios pendientes (request_close) ----
+def never_asked():
+    raise AssertionError("no debía pedir confirmación: no hay cambios pendientes")
+
+
+def test_pending_changes_are_exactly_a_result_waiting_for_ok(env):
+    opened(env)
+    assert env.remove.has_pending_changes is False
+    env.remove.run()
+    assert env.op.started.wait(5)
+    assert env.remove.has_pending_changes is False  # procesando: aún no hay nada que confirmar
+    env.op.gate.set()
+    pump(env, lambda: env.remove.state is RemoveState.COMPLETED)
+    assert env.remove.has_pending_changes is True and env.remove.can_ok
+    env.remove.ok()
+    assert env.remove.has_pending_changes is False  # confirmado: ya vive en el documento
+
+
+def test_x_without_pending_changes_closes_directly_and_does_not_ask(env):
+    opened(env)
+    assert env.remove.request_close(never_asked) is True
+    assert env.remove.state is RemoveState.CLOSED and env.view.closed == 1
+    assert document_untouched(env) and lumine_free(env)
+
+
+def test_x_after_an_error_or_a_discarded_result_closes_without_asking(env):
+    opened(env)
+    env.op.fail = True
+    env.op.gate.set()
+    env.remove.run()
+    pump(env, lambda: env.remove.state is RemoveState.ERROR)
+    assert env.remove.has_pending_changes is False
+    assert env.remove.request_close(never_asked) is True
+    assert env.remove.state is RemoveState.CLOSED and document_untouched(env)
+
+
+def test_x_with_a_pending_result_asks_and_keep_editing_leaves_everything_as_it_was(env):
+    opened(env)
+    run_to_completion(env)
+    result, closed_before, statuses = env.remove.result, env.view.closed, list(env.view.statuses)
+    asked = []
+    assert env.remove.request_close(lambda: asked.append(1) or False) is False
+    assert asked == [1]
+    assert env.remove.state is RemoveState.COMPLETED and env.remove.result is result
+    assert env.remove.can_ok and env.view.closed == closed_before == 0
+    assert env.view.statuses == statuses and document_untouched(env)
+    assert env.design.interaction.workspace == "remove_background"
+    assert env.remove.ok() is True  # y se puede seguir: confirmar sigue funcionando
+    assert env.service.snapshot().operations != ()
+
+
+def test_x_discarding_a_pending_result_behaves_like_cancel(env):
+    opened(env)
+    run_to_completion(env)
+    assert env.remove.request_close(lambda: True) is True
+    assert env.remove.state is RemoveState.CLOSED and env.remove.result is None
+    assert env.view.closed == 1 and env.view.after_close == []
+    assert document_untouched(env) and env.main.snapshots == [] and lumine_free(env)
+
+
+def test_x_never_loses_what_ok_already_confirmed(env):
+    opened(env)
+    run_to_completion(env)
+    assert env.remove.ok() is True
+    confirmed = env.service.snapshot()
+    assert confirmed.operations != () and revision(env) == 2
+    assert env.remove.request_close(never_asked) is True  # sesión ya cerrada: no hace ni pregunta nada
+    # Remove se abre de nuevo: es otra sesión; lo confirmado antes NO cuenta como cambio pendiente.
+    again = RemoveController(env.design)
+    view = RemoveViewFake()
+    assert again.open()
+    again.attach_view(view)
+    assert again.has_pending_changes is False
+    assert again.request_close(never_asked) is True
+    snap = env.service.snapshot()
+    assert snap.image is confirmed.image and snap.operations == confirmed.operations and revision(env) == 2
+
+
+def test_new_edits_after_an_error_are_detected_again(env):
+    opened(env)
+    env.op.fail = True
+    env.op.gate.set()
+    env.remove.run()
+    pump(env, lambda: env.remove.state is RemoveState.ERROR)
+    assert env.remove.has_pending_changes is False
+    env.op.fail = False
+    assert env.remove.run()
+    pump(env, lambda: env.remove.state is RemoveState.COMPLETED)
+    assert env.remove.has_pending_changes is True
+    asked = []
+    assert env.remove.request_close(lambda: asked.append(1) or False) is False and asked == [1]
+
+
+def test_x_while_processing_only_alerts_does_not_ask_and_processing_continues(env):
+    opened(env)
+    env.remove.run()
+    assert env.op.started.wait(5)
+    snapshot = (list(env.view.statuses), list(env.view.images), env.view.state_changes)
+    assert env.remove.request_close(never_asked) is False
+    assert env.view.alerts == 1 and env.view.closed == 0
+    assert env.remove.state is RemoveState.PROCESSING
+    assert (list(env.view.statuses), list(env.view.images), env.view.state_changes) == snapshot
+    assert env.design.interaction.workspace == "remove_background"
+    env.op.gate.set()
+    pump(env, lambda: env.remove.state is RemoveState.COMPLETED)
+    assert env.remove.result is not None and env.view.alerts == 1 and env.op.calls == 1
+    # terminada la IA, la X vuelve a ser la normal: con resultado pendiente pregunta
+    assert env.remove.request_close(lambda: False) is False and env.view.alerts == 1
+
+
+def test_cancel_and_x_attempts_together_do_not_interrupt_the_task(env):
+    opened(env)
+    env.remove.run()
+    assert env.op.started.wait(5)
+    env.remove.cancel()
+    assert env.remove.request_close(never_asked) is False
+    env.remove.cancel()
+    assert env.view.alerts == 3 and env.remove.state is RemoveState.PROCESSING
+    env.op.gate.set()
+    pump(env, lambda: env.remove.state is RemoveState.COMPLETED)
+    assert env.remove.ok() is True and document_untouched(env) is False and revision(env) == 2
+
+
+def test_the_existing_cancel_button_is_unchanged_by_request_close(env):
+    opened(env)
+    run_to_completion(env)
+    env.remove.cancel()  # Cancelar nunca pregunta, haya o no cambios pendientes
+    assert env.remove.state is RemoveState.CLOSED and document_untouched(env) and lumine_free(env)
